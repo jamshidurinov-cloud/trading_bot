@@ -135,6 +135,7 @@ def get_gold_news():
         raise RuntimeError(f"NewsAPI xatosi ({data.get('code')}): {data.get('message')}")
     resp.raise_for_status()
 
+    total_results = data.get("totalResults", 0)
     articles = data.get("articles", [])
     headlines = []
     for a in articles[:5]:
@@ -143,7 +144,7 @@ def get_gold_news():
         if title:
             headlines.append(f"- {title} ({source})")
 
-    return headlines
+    return headlines, total_results
 
 
 def analyze_with_claude(chart_path, price_data, headlines):
@@ -271,8 +272,9 @@ def main():
         sys.exit(1)
 
     news_error = None
+    total_results = None
     try:
-        headlines = get_gold_news()
+        headlines, total_results = get_gold_news()
     except Exception as e:
         news_error = str(e)
         headlines = []
@@ -293,7 +295,11 @@ def main():
 
     full_analysis = f"📊 SMC/ICT/Wyckoff Tahlili:\n\n{analysis}"
     if news_error:
-        full_analysis += f"\n\n⚠️ Yangilik olinmadi: {news_error}"
+        full_analysis += f"\n\n⚠️ Yangilik olinmadi (xatolik): {news_error}"
+    elif not headlines:
+        full_analysis += f"\n\nℹ️ Yangilik topilmadi (NewsAPI natijasi: {total_results} ta maqola)."
+    else:
+        full_analysis += f"\n\nℹ️ Tahlilda ishlatilgan yangiliklar soni: {len(headlines)}"
     send_telegram_message(full_analysis)
 
     print("Grafik va tahlil muvaffaqiyatli yuborildi.")
