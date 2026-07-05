@@ -53,7 +53,7 @@ def get_gold_price():
     }
 
 
-def get_gold_candles(interval="5min", outputsize=100):
+def get_gold_candles(interval="15min", outputsize=100):
     """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi, grafik chizish uchun."""
     import pandas as pd
 
@@ -84,16 +84,34 @@ def get_gold_candles(interval="5min", outputsize=100):
 
 
 def make_chart_image(df, path="/tmp/chart.png"):
-    """OHLCV ma'lumotidan candlestick + volume grafik chizib, faylga saqlaydi."""
+    """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizib, faylga saqlaydi."""
     import mplfinance as mpf
+
+    mc = mpf.make_marketcolors(
+        up="#26a69a", down="#ef5350",
+        edge="inherit", wick="inherit", volume="in",
+    )
+    style = mpf.make_mpf_style(
+        base_mpf_style="charles",
+        marketcolors=mc,
+        gridstyle="--",
+        gridcolor="#dddddd",
+        facecolor="white",
+        rc={"font.size": 11, "axes.labelsize": 12, "axes.titlesize": 14},
+    )
 
     mpf.plot(
         df,
         type="candle",
         volume=True,
-        style="charles",
-        title="XAUUSD - so'nggi svechalar",
-        savefig=dict(fname=path, dpi=150, bbox_inches="tight"),
+        style=style,
+        title="\nXAUUSD - so'nggi 100 ta 5 daqiqalik sveча",
+        ylabel="Narx (USD)",
+        ylabel_lower="Hajm",
+        figsize=(16, 9),
+        tight_layout=True,
+        scale_padding={"left": 0.3, "right": 0.7, "top": 0.8, "bottom": 0.5},
+        savefig=dict(fname=path, dpi=220, bbox_inches="tight"),
     )
     return path
 
@@ -109,8 +127,13 @@ def get_gold_news():
         "apiKey": NEWSAPI_API_KEY,
     }
     resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
     data = resp.json()
+
+    # NewsAPI ba'zida HTTP 200 qaytarib, lekin ichida "status": "error" beradi —
+    # shuning uchun buni alohida tekshiramiz, aks holda xato sababi yashirin qoladi.
+    if data.get("status") == "error":
+        raise RuntimeError(f"NewsAPI xatosi ({data.get('code')}): {data.get('message')}")
+    resp.raise_for_status()
 
     articles = data.get("articles", [])
     headlines = []
@@ -216,6 +239,25 @@ def send_telegram_photo(photo_path, caption=""):
         send_telegram_message(caption)
 
 
+def send_telegram_document(file_path, caption=""):
+    """Grafikni Telegram'ga HUJJAT (document) sifatida yuboradi — bu Telegram'ning
+    rasm siqish (compression) jarayonidan o'tmaydi, shuning uchun sifat yuqori,
+    matn va chiziqlar aniqroq ko'rinadi."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    short_caption = caption[:1000] if caption else ""
+    with open(file_path, "rb") as f:
+        resp = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": short_caption},
+            files={"document": f},
+            timeout=30,
+        )
+    resp.raise_for_status()
+
+    if caption and len(caption) > 1000:
+        send_telegram_message(caption)
+
+
 def main():
     check_env_vars()
 
@@ -232,10 +274,11 @@ def main():
         send_telegram_message(f"⚠️ Grafik yaratishda xatolik: {e}")
         sys.exit(1)
 
+    news_error = None
     try:
         headlines = get_gold_news()
     except Exception as e:
-        print(f"Yangilik olishda xatolik (davom etamiz): {e}")
+        news_error = str(e)
         headlines = []
 
     try:
@@ -250,8 +293,10 @@ def main():
         f"({price_data['change']}, {price_data['percent_change']}%)\n\n"
         f"📊 SMC/ICT/Wyckoff Tahlili:\n{analysis}"
     )
+    if news_error:
+        caption += f"\n\n⚠️ Yangilik olinmadi: {news_error}"
 
-    send_telegram_photo(chart_path, caption=caption)
+    send_telegram_document(chart_path, caption=caption)
     print("Grafik va tahlil muvaffaqiyatli yuborildi.")
 
 
