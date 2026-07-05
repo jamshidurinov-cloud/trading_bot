@@ -53,7 +53,7 @@ def get_gold_price():
     }
 
 
-def get_gold_candles(interval="15min", outputsize=100):
+def get_gold_candles(interval="5min", outputsize=100):
     """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi, grafik chizish uchun."""
     import pandas as pd
 
