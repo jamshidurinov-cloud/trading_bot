@@ -214,48 +214,44 @@ So'nggi yangiliklar:
 
 
 def send_telegram_message(text):
-    """Telegram bot orqali matnli xabar yuboradi."""
+    """Telegram bot orqali matnli xabar yuboradi. Agar matn Telegram chegarasidan
+    (4096 belgi) uzun bo'lsa, avtomatik bir necha qismga bo'lib yuboradi —
+    hech qanday matn kesilib qolmaydi."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=15)
-    resp.raise_for_status()
+    max_len = 4000  # xavfsizlik uchun 4096'dan biroz kam
+
+    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
+    for chunk in chunks:
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=15)
+        resp.raise_for_status()
 
 
 def send_telegram_photo(photo_path, caption=""):
-    """Telegram bot orqali grafik rasmini (va tavsifni) yuboradi.
-    Telegram caption uzunligi cheklangan (1024 belgi), shuning uchun uzun bo'lsa
-    rasm qisqa izoh bilan, keyin to'liq tahlil alohida xabar sifatida yuboriladi."""
+    """Telegram bot orqali grafik rasmini (qisqa izoh bilan) yuboradi."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    short_caption = caption[:1000] if caption else ""
     with open(photo_path, "rb") as f:
         resp = requests.post(
             url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": short_caption},
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
             files={"photo": f},
             timeout=30,
         )
     resp.raise_for_status()
 
-    if caption and len(caption) > 1000:
-        send_telegram_message(caption)
-
 
 def send_telegram_document(file_path, caption=""):
-    """Grafikni Telegram'ga HUJJAT (document) sifatida yuboradi — bu Telegram'ning
-    rasm siqish (compression) jarayonidan o'tmaydi, shuning uchun sifat yuqori,
-    matn va chiziqlar aniqroq ko'rinadi."""
+    """Grafikni Telegram'ga HUJJAT (document) sifatida, qisqa izoh bilan yuboradi —
+    bu Telegram'ning rasm siqish (compression) jarayonidan o'tmaydi, shuning uchun
+    sifat yuqori, matn va chiziqlar aniqroq ko'rinadi."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    short_caption = caption[:1000] if caption else ""
     with open(file_path, "rb") as f:
         resp = requests.post(
             url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": short_caption},
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
             files={"document": f},
             timeout=30,
         )
     resp.raise_for_status()
-
-    if caption and len(caption) > 1000:
-        send_telegram_message(caption)
 
 
 def main():
@@ -290,13 +286,16 @@ def main():
     caption = (
         f"🥇 XAUUSD Yangilanishi\n"
         f"Narx: {price_data['price']} USD "
-        f"({price_data['change']}, {price_data['percent_change']}%)\n\n"
-        f"📊 SMC/ICT/Wyckoff Tahlili:\n{analysis}"
+        f"({price_data['change']}, {price_data['percent_change']}%)"
     )
-    if news_error:
-        caption += f"\n\n⚠️ Yangilik olinmadi: {news_error}"
 
     send_telegram_document(chart_path, caption=caption)
+
+    full_analysis = f"📊 SMC/ICT/Wyckoff Tahlili:\n\n{analysis}"
+    if news_error:
+        full_analysis += f"\n\n⚠️ Yangilik olinmadi: {news_error}"
+    send_telegram_message(full_analysis)
+
     print("Grafik va tahlil muvaffaqiyatli yuborildi.")
 
 
