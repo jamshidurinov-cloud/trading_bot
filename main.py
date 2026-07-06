@@ -503,6 +503,10 @@ def main():
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik: {e}")
         sys.exit(1)
 
+    # DEBUG: hajm ma'lumoti haqiqatan kelayotganini tekshirish uchun (Render Logs'da ko'rinadi)
+    print("So'nggi 10 ta sveчaning narx va hajm ma'lumoti:")
+    print(candles_df[["close", "volume"]].tail(10))
+
     if mode == "signal":
         run_signal_check(candles_df, price_data)
     elif mode == "status":
