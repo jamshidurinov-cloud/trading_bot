@@ -1,8 +1,15 @@
 """
-Tilla (XAUUSD) narxi va yangiliklarini kuzatuvchi, AI tahlil qiluvchi Telegram bot.
+Tilla (XAUUSD) Wyckoff Spring/Upthrust signal beruvchi va soatlik holat
+xabar qiluvchi Telegram bot.
 
-Bu skript bir marta ishga tushadi, tekshiradi, xabar yuboradi va tugaydi.
-Render'da "Cron Job" sifatida har 15-30 daqiqada avtomatik ishga tushiriladi.
+Ikki rejimda ishlaydi (Render'da ikkita alohida Cron Job sifatida sozlanadi):
+
+  python main.py signal   -> har 5 daqiqada: faqat SPRING/UPTHRUST chiqqanda
+                              to'liq signal + grafik + AI tahlil yuboradi.
+                              Signal bo'lmasa, jim chiqadi (xabar yubormaydi).
+
+  python main.py status   -> har soatda: joriy narx, diapazon va
+                              range/uchburchak holatini qisqa xabar qilib yuboradi.
 """
 
 import os
@@ -24,6 +31,9 @@ REQUIRED_VARS = {
     "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
 }
 
+RANGE_LOOKBACK = 20      # diapazonni aniqlash uchun necha sveчadan foydalanish
+VOLUME_MULTIPLIER = 1.5  # hajm "tasdiq" deb hisoblanishi uchun o'rtachadan necha baravar yuqori bo'lishi kerak
+
 
 def check_env_vars():
     missing = [name for name, value in REQUIRED_VARS.items() if not value]
@@ -31,6 +41,10 @@ def check_env_vars():
         print(f"XATOLIK: quyidagi environment variable'lar topilmadi: {', '.join(missing)}")
         sys.exit(1)
 
+
+# ============================================================================
+# MA'LUMOT OLISH (TwelveData)
+# ============================================================================
 
 def get_gold_price():
     """TwelveData orqali XAU/USD narxi va o'zgarish foizini oladi."""
@@ -53,8 +67,8 @@ def get_gold_price():
     }
 
 
-def get_gold_candles(interval="15min", outputsize=100):
-    """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi, grafik chizish uchun."""
+def get_gold_candles(interval="5min", outputsize=100):
+    """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi."""
     import pandas as pd
 
     url = "https://api.twelvedata.com/time_series"
@@ -78,13 +92,162 @@ def get_gold_candles(interval="15min", outputsize=100):
         if col in df.columns:
             df[col] = df[col].astype(float)
         else:
-            df[col] = 0.0  # ba'zi tariflarda volume kelmasligi mumkin
+            df[col] = 0.0
 
     return df
 
 
+def get_gold_news():
+    """NewsAPI orqali oltin/XAUUSD'ga aloqador so'nggi yangiliklarni oladi."""
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": "gold price OR XAUUSD OR bullion",
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": 5,
+        "apiKey": NEWSAPI_API_KEY,
+    }
+    resp = requests.get(url, params=params, timeout=15)
+    data = resp.json()
+
+    if data.get("status") == "error":
+        raise RuntimeError(f"NewsAPI xatosi ({data.get('code')}): {data.get('message')}")
+    resp.raise_for_status()
+
+    total_results = data.get("totalResults", 0)
+    articles = data.get("articles", [])
+    headlines = []
+    for a in articles[:5]:
+        title = a.get("title", "")
+        source = a.get("source", {}).get("name", "")
+        if title:
+            headlines.append(f"- {title} ({source})")
+
+    return headlines, total_results
+
+
+# ============================================================================
+# QOIDA DVIGATELI - Wyckoff Spring / Upthrust / Range holati
+# ============================================================================
+
+def detect_spring(df, lookback=RANGE_LOOKBACK, vol_mult=VOLUME_MULTIPLIER):
+    """SPRING: narx diapazon pastki chegarasidan soxta chiqib, qaytib kiradi,
+    va bu hajm bilan tasdiqlanadi (o'rtachadan yuqori hajm)."""
+    if len(df) < lookback + 1:
+        return None
+
+    window = df.iloc[-(lookback + 1):-1]
+    current = df.iloc[-1]
+
+    range_low = window["low"].min()
+    range_high = window["high"].max()
+    avg_volume = window["volume"].mean()
+
+    is_false_breakdown = current["low"] < range_low and current["close"] > range_low
+    is_volume_confirmed = avg_volume > 0 and current["volume"] > avg_volume * vol_mult
+
+    if is_false_breakdown and is_volume_confirmed:
+        return {
+            "type": "spring",
+            "range_low": range_low,
+            "range_high": range_high,
+            "candle_low": current["low"],
+            "candle_close": current["close"],
+            "volume": current["volume"],
+            "avg_volume": avg_volume,
+            "time": str(current.name),
+        }
+    return None
+
+
+def detect_upthrust(df, lookback=RANGE_LOOKBACK, vol_mult=VOLUME_MULTIPLIER):
+    """UPTHRUST: narx diapazon yuqori chegarasidan soxta chiqib, qaytib kiradi,
+    va bu hajm bilan tasdiqlanadi."""
+    if len(df) < lookback + 1:
+        return None
+
+    window = df.iloc[-(lookback + 1):-1]
+    current = df.iloc[-1]
+
+    range_low = window["low"].min()
+    range_high = window["high"].max()
+    avg_volume = window["volume"].mean()
+
+    is_false_breakout = current["high"] > range_high and current["close"] < range_high
+    is_volume_confirmed = avg_volume > 0 and current["volume"] > avg_volume * vol_mult
+
+    if is_false_breakout and is_volume_confirmed:
+        return {
+            "type": "upthrust",
+            "range_low": range_low,
+            "range_high": range_high,
+            "candle_high": current["high"],
+            "candle_close": current["close"],
+            "volume": current["volume"],
+            "avg_volume": avg_volume,
+            "time": str(current.name),
+        }
+    return None
+
+
+def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
+    """Joriy holat qanday diapazon/uchburchak turiga to'g'ri kelishini aniqlaydi:
+    - bullish_squeeze: pastki chegara ko'tarilib, yuqoriga qisilmoqda
+    - bearish_squeeze: yuqori chegara pasayib, pastga qisilmoqda
+    - symmetrical_triangle: ikkala tomondan torayapti
+    - flat_range: torayish yo'q, lekin narx tor oraliqda (oddiy gorizontal diapazon)
+    - None: aniq diapazon yo'q (narx keng harakatda / trendda)
+    """
+    if len(df) < lookback:
+        return None
+
+    window = df.iloc[-lookback:]
+    half = lookback // 2
+    first_half = window.iloc[:half]
+    second_half = window.iloc[half:]
+
+    high_first, high_second = first_half["high"].max(), second_half["high"].max()
+    low_first, low_second = first_half["low"].min(), second_half["low"].min()
+
+    width_first = high_first - low_first
+    width_second = high_second - low_second
+    current_price = window["close"].iloc[-1]
+
+    if current_price <= 0:
+        return None
+
+    width_pct = (width_second / current_price) * 100
+
+    if width_pct > tight_threshold_pct * 3:
+        return None
+
+    narrowing = width_second < width_first * 0.75
+    high_falling = high_second < high_first
+    low_rising = low_second > low_first
+
+    if narrowing and low_rising and not high_falling:
+        rtype = "bullish_squeeze"
+    elif narrowing and high_falling and not low_rising:
+        rtype = "bearish_squeeze"
+    elif narrowing and low_rising and high_falling:
+        rtype = "symmetrical_triangle"
+    else:
+        rtype = "flat_range"
+
+    return {
+        "type": rtype,
+        "range_high": high_second,
+        "range_low": low_second,
+        "width_pct": round(width_pct, 3),
+    }
+
+
+# ============================================================================
+# GRAFIK CHIZISH
+# ============================================================================
+
 def make_chart_image(df, path="/tmp/chart.png"):
-    """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizib, faylga saqlaydi."""
+    """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi."""
     import mplfinance as mpf
 
     mc = mpf.make_marketcolors(
@@ -116,40 +279,13 @@ def make_chart_image(df, path="/tmp/chart.png"):
     return path
 
 
-def get_gold_news():
-    """NewsAPI orqali oltin/XAUUSD'ga aloqador so'nggi yangiliklarni oladi."""
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": "gold price OR XAUUSD OR bullion",
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": 5,
-        "apiKey": NEWSAPI_API_KEY,
-    }
-    resp = requests.get(url, params=params, timeout=15)
-    data = resp.json()
+# ============================================================================
+# AI TAHLIL (faqat signal chiqqanda chaqiriladi)
+# ============================================================================
 
-    # NewsAPI ba'zida HTTP 200 qaytarib, lekin ichida "status": "error" beradi —
-    # shuning uchun buni alohida tekshiramiz, aks holda xato sababi yashirin qoladi.
-    if data.get("status") == "error":
-        raise RuntimeError(f"NewsAPI xatosi ({data.get('code')}): {data.get('message')}")
-    resp.raise_for_status()
-
-    total_results = data.get("totalResults", 0)
-    articles = data.get("articles", [])
-    headlines = []
-    for a in articles[:5]:
-        title = a.get("title", "")
-        source = a.get("source", {}).get("name", "")
-        if title:
-            headlines.append(f"- {title} ({source})")
-
-    return headlines, total_results
-
-
-def analyze_with_claude(chart_path, price_data, headlines):
-    """Grafik rasmi, narx va yangiliklarni Claude API'ga yuborib,
-    SMC/ICT/Wyckoff/hajm nuqtai nazaridan tahlil oldiradi."""
+def analyze_with_claude(chart_path, price_data, headlines, signal):
+    """Grafik, narx, aniqlangan signal va yangiliklarni Claude API'ga yuborib,
+    signalni tasdiqlovchi/rad etuvchi qisqa tahlil oldiradi."""
     import base64
 
     news_text = "\n".join(headlines) if headlines else "Yangilik topilmadi."
@@ -157,25 +293,41 @@ def analyze_with_claude(chart_path, price_data, headlines):
     with open(chart_path, "rb") as f:
         image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    prompt = f"""Sen SMC (Smart Money Concepts), ICT, Wyckoff va hajm (volume) tahliliga ixtisoslashgan
-treyder-tahlilchisan. Ilova qilingan XAUUSD grafigini shu metodlar nuqtai nazaridan tahlil qil:
+    if signal["type"] == "spring":
+        signal_desc = (
+            f"SPRING (Wyckoff) — narx {signal['range_low']:.2f} diapazon pastki chegarasidan "
+            f"soxta chiqib ({signal['candle_low']:.2f} gacha tushib), qaytib {signal['candle_close']:.2f} "
+            f"darajasida yopilgan. Hajm {signal['volume']:.0f}, o'rtacha hajmdan "
+            f"({signal['avg_volume']:.0f}) sezilarli yuqori."
+        )
+    else:
+        signal_desc = (
+            f"UPTHRUST (Wyckoff) — narx {signal['range_high']:.2f} diapazon yuqori chegarasidan "
+            f"soxta chiqib ({signal['candle_high']:.2f} gacha ko'tarilib), qaytib {signal['candle_close']:.2f} "
+            f"darajasida yopilgan. Hajm {signal['volume']:.0f}, o'rtacha hajmdan "
+            f"({signal['avg_volume']:.0f}) sezilarli yuqori."
+        )
 
-- Market structure (BOS/CHoCH bo'lishi mumkinmi)
-- Ehtimoliy order block yoki fair value gap zonalari
-- Liquidity zonalari (qayerda stop-loss'lar to'planishi mumkin)
-- Wyckoff bosqichi (accumulation/distribution/markup/markdown belgilarimi)
-- Hajm (volume) tasdiqlaydimi yoki rad etadimi
+    prompt = f"""Sen SMC/ICT/Wyckoff va hajm tahliliga ixtisoslashgan treyder-tahlilchisan.
 
-Javobni o'zbek tilida, Telegram xabari uchun mos, qisqa va aniq formatda yoz (bo'limlarga bo'lib).
-Bashorat yoki "sotib ol/sot" degan tavsiya berma — faqat kuzatuv va e'tibor qaratish kerak bo'lgan
-narsalarni ayt. Oxirida "Bu tavsiya emas, faqat texnik kuzatuv" deb yoz.
+Kod avtomatik ravishda quyidagi signalni aniqladi:
+{signal_desc}
+
+Ilova qilingan XAUUSD grafigini ko'rib:
+1. Shu signalni TASDIQLA yoki unga SHUBHA bildir (nima uchun ishonchli/ishonchsiz)
+2. Liquidity va order block nuqtai nazaridan qo'shimcha kontekst ber
+3. Quyida berilgan so'nggi yangiliklarni sharhla — ular ushbu signalga mos keladimi
+   yoki qarama-qarshimi (masalan signal bullish, lekin yangilik bearish bo'lsa, buni ayt)
+
+Javobni o'zbek tilida, Telegram xabari uchun mos, qisqa va aniq formatda yoz.
+Bashorat yoki "sotib ol/sot" tavsiyasi berma — faqat texnik kuzatuv va yangilik konteksti ber.
+Oxirida "Bu tavsiya emas, faqat texnik kuzatuv" deb yoz.
 
 Qo'shimcha ma'lumot:
 Joriy narx: {price_data['price']}
 O'zgarish: {price_data['change']} ({price_data['percent_change']}%)
-Kunlik yuqori/past: {price_data['high']} / {price_data['low']}
 
-So'nggi yangiliklar:
+So'nggi yangiliklar (sarlavhalar):
 {news_text}
 """
 
@@ -188,18 +340,14 @@ So'nggi yangiliklar:
         },
         json={
             "model": "claude-sonnet-4-6",
-            "max_tokens": 700,
+            "max_tokens": 1000,
             "messages": [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": image_b64,
-                            },
+                            "source": {"type": "base64", "media_type": "image/png", "data": image_b64},
                         },
                         {"type": "text", "text": prompt},
                     ],
@@ -210,40 +358,26 @@ So'nggi yangiliklar:
     )
     resp.raise_for_status()
     data = resp.json()
-    text_blocks = [block["text"] for block in data.get("content", []) if block.get("type") == "text"]
+    text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
     return "\n".join(text_blocks).strip()
 
 
-def send_telegram_message(text):
-    """Telegram bot orqali matnli xabar yuboradi. Agar matn Telegram chegarasidan
-    (4096 belgi) uzun bo'lsa, avtomatik bir necha qismga bo'lib yuboradi —
-    hech qanday matn kesilib qolmaydi."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    max_len = 4000  # xavfsizlik uchun 4096'dan biroz kam
+# ============================================================================
+# TELEGRAM YUBORISH
+# ============================================================================
 
+def send_telegram_message(text):
+    """Matnli xabar yuboradi. Uzun bo'lsa avtomatik bo'laklarga bo'ladi."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    max_len = 4000
     chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
     for chunk in chunks:
         resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=15)
         resp.raise_for_status()
 
 
-def send_telegram_photo(photo_path, caption=""):
-    """Telegram bot orqali grafik rasmini (qisqa izoh bilan) yuboradi."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    with open(photo_path, "rb") as f:
-        resp = requests.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-            files={"photo": f},
-            timeout=30,
-        )
-    resp.raise_for_status()
-
-
 def send_telegram_document(file_path, caption=""):
-    """Grafikni Telegram'ga HUJJAT (document) sifatida, qisqa izoh bilan yuboradi —
-    bu Telegram'ning rasm siqish (compression) jarayonidan o'tmaydi, shuning uchun
-    sifat yuqori, matn va chiziqlar aniqroq ko'rinadi."""
+    """Grafikni HUJJAT sifatida (siqilmasdan, yuqori sifatda) yuboradi."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     with open(file_path, "rb") as f:
         resp = requests.post(
@@ -255,21 +389,20 @@ def send_telegram_document(file_path, caption=""):
     resp.raise_for_status()
 
 
-def main():
-    check_env_vars()
+# ============================================================================
+# REJIM 1: SIGNAL TEKSHIRUV (har 5 daqiqada)
+# ============================================================================
 
-    try:
-        price_data = get_gold_price()
-    except Exception as e:
-        send_telegram_message(f"⚠️ Narx ma'lumotini olishda xatolik: {e}")
-        sys.exit(1)
+def run_signal_check(df, price_data):
+    spring = detect_spring(df)
+    upthrust = detect_upthrust(df)
+    signal = spring or upthrust
 
-    try:
-        candles_df = get_gold_candles(interval="5min", outputsize=100)
-        chart_path = make_chart_image(candles_df)
-    except Exception as e:
-        send_telegram_message(f"⚠️ Grafik yaratishda xatolik: {e}")
-        sys.exit(1)
+    if not signal:
+        print("Signal yo'q — jim chiqamiz.")
+        return
+
+    chart_path = make_chart_image(df)
 
     news_error = None
     total_results = None
@@ -280,29 +413,103 @@ def main():
         headlines = []
 
     try:
-        analysis = analyze_with_claude(chart_path, price_data, headlines)
+        analysis = analyze_with_claude(chart_path, price_data, headlines, signal)
     except Exception as e:
-        send_telegram_message(f"⚠️ AI tahlilida xatolik: {e}")
-        sys.exit(1)
+        analysis = f"(AI tahlili olinmadi: {e})"
+
+    if signal["type"] == "spring":
+        emoji, label = "🟢", "SPRING (pastga soxta sinish -> mumkin bo'lgan ko'tarilish)"
+    else:
+        emoji, label = "🔴", "UPTHRUST (yuqoriga soxta sinish -> mumkin bo'lgan tushish)"
 
     caption = (
-        f"🥇 XAUUSD Yangilanishi\n"
-        f"Narx: {price_data['price']} USD "
-        f"({price_data['change']}, {price_data['percent_change']}%)"
+        f"{emoji} {label}\n"
+        f"Narx: {price_data['price']} USD\n"
+        f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+        f"Hajm: {signal['volume']:.0f} (o'rtacha: {signal['avg_volume']:.0f})"
     )
-
     send_telegram_document(chart_path, caption=caption)
 
-    full_analysis = f"📊 SMC/ICT/Wyckoff Tahlili:\n\n{analysis}"
+    full_analysis = f"📊 AI Tahlili:\n\n{analysis}"
     if news_error:
         full_analysis += f"\n\n⚠️ Yangilik olinmadi (xatolik): {news_error}"
     elif not headlines:
         full_analysis += f"\n\nℹ️ Yangilik topilmadi (NewsAPI natijasi: {total_results} ta maqola)."
     else:
         full_analysis += f"\n\nℹ️ Tahlilda ishlatilgan yangiliklar soni: {len(headlines)}"
-    send_telegram_message(full_analysis)
 
-    print("Grafik va tahlil muvaffaqiyatli yuborildi.")
+    send_telegram_message(full_analysis)
+    print(f"{label} signali yuborildi.")
+
+
+# ============================================================================
+# REJIM 2: SOATLIK HOLAT (har soatda)
+# ============================================================================
+
+RANGE_TYPE_NAMES = {
+    "bullish_squeeze": "📈 Yuqoriga qisilish (bullish squeeze) — pastki chegara ko'tarilmoqda",
+    "bearish_squeeze": "📉 Pastga qisilish (bearish squeeze) — yuqori chegara pasaymoqda",
+    "symmetrical_triangle": "🔺 Simmetrik uchburchak — ikkala tomondan torayapti",
+    "flat_range": "📦 Oddiy gorizontal diapazon — tor oraliqda tebranmoqda",
+}
+
+
+def run_hourly_status(df, price_data):
+    lookback = RANGE_LOOKBACK
+    if len(df) < lookback + 1:
+        send_telegram_message("🕐 Soatlik holat: ma'lumot yetarli emas.")
+        return
+
+    window = df.iloc[-(lookback + 1):-1]
+    range_low = window["low"].min()
+    range_high = window["high"].max()
+
+    range_state = detect_range_state(df, lookback=lookback)
+
+    lines = [
+        "🕐 Soatlik holat",
+        f"Narx: {price_data['price']} USD",
+        f"Diapazon (so'nggi {lookback} sveча): {range_low:.2f} – {range_high:.2f}",
+    ]
+
+    if range_state:
+        lines.append(f"\n{RANGE_TYPE_NAMES.get(range_state['type'], range_state['type'])}")
+    else:
+        lines.append("\n📐 Holat: Aniq diapazon/uchburchak shakli yo'q (trend/keng harakat)")
+
+    lines.append("\nSignal: Hozircha spring/upthrust aniqlanmadi (aniqlansa alohida xabar keladi)")
+
+    send_telegram_message("\n".join(lines))
+    print("Soatlik holat yuborildi.")
+
+
+# ============================================================================
+# ASOSIY DASTUR
+# ============================================================================
+
+def main():
+    check_env_vars()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "signal"
+
+    try:
+        price_data = get_gold_price()
+    except Exception as e:
+        send_telegram_message(f"⚠️ Narx ma'lumotini olishda xatolik: {e}")
+        sys.exit(1)
+
+    try:
+        candles_df = get_gold_candles(interval="5min", outputsize=100)
+    except Exception as e:
+        send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik: {e}")
+        sys.exit(1)
+
+    if mode == "signal":
+        run_signal_check(candles_df, price_data)
+    elif mode == "status":
+        run_hourly_status(candles_df, price_data)
+    else:
+        print(f"Noma'lum rejim: {mode}. 'signal' yoki 'status' bo'lishi kerak.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
