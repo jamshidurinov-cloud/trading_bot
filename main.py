@@ -32,7 +32,10 @@ REQUIRED_VARS = {
 }
 
 RANGE_LOOKBACK = 20      # diapazonni aniqlash uchun necha sveчadan foydalanish
-VOLUME_MULTIPLIER = 1.5  # hajm "tasdiq" deb hisoblanishi uchun o'rtachadan necha baravar yuqori bo'lishi kerak
+EFFORT_MULTIPLIER = 1.5  # svecha "kuchli harakat" deb hisoblanishi uchun o'rtacha svecha
+                         # kattaligidan necha baravar yuqori bo'lishi kerak
+                         # (XAUUSD'da haqiqiy savdo hajmi mavjud emasligi sababli,
+                         # hajm o'rniga svecha kattaligi - high-low farqi - ishlatiladi)
 
 
 def check_env_vars():
@@ -130,9 +133,10 @@ def get_gold_news():
 # QOIDA DVIGATELI - Wyckoff Spring / Upthrust / Range holati
 # ============================================================================
 
-def detect_spring(df, lookback=RANGE_LOOKBACK, vol_mult=VOLUME_MULTIPLIER):
+def detect_spring(df, lookback=RANGE_LOOKBACK, effort_mult=EFFORT_MULTIPLIER):
     """SPRING: narx diapazon pastki chegarasidan soxta chiqib, qaytib kiradi,
-    va bu hajm bilan tasdiqlanadi (o'rtachadan yuqori hajm)."""
+    va bu KUCHLI HARAKAT (o'rtachadan kattaroq svecha) bilan tasdiqlanadi.
+    (XAUUSD'da haqiqiy hajm yo'qligi sababli, svecha kattaligi - high-low - ishlatiladi)."""
     if len(df) < lookback + 1:
         return None
 
@@ -141,28 +145,29 @@ def detect_spring(df, lookback=RANGE_LOOKBACK, vol_mult=VOLUME_MULTIPLIER):
 
     range_low = window["low"].min()
     range_high = window["high"].max()
-    avg_volume = window["volume"].mean()
+    avg_candle_range = (window["high"] - window["low"]).mean()
+    current_candle_range = current["high"] - current["low"]
 
     is_false_breakdown = current["low"] < range_low and current["close"] > range_low
-    is_volume_confirmed = avg_volume > 0 and current["volume"] > avg_volume * vol_mult
+    is_effort_confirmed = avg_candle_range > 0 and current_candle_range > avg_candle_range * effort_mult
 
-    if is_false_breakdown and is_volume_confirmed:
+    if is_false_breakdown and is_effort_confirmed:
         return {
             "type": "spring",
             "range_low": range_low,
             "range_high": range_high,
             "candle_low": current["low"],
             "candle_close": current["close"],
-            "volume": current["volume"],
-            "avg_volume": avg_volume,
+            "candle_range": current_candle_range,
+            "avg_candle_range": avg_candle_range,
             "time": str(current.name),
         }
     return None
 
 
-def detect_upthrust(df, lookback=RANGE_LOOKBACK, vol_mult=VOLUME_MULTIPLIER):
+def detect_upthrust(df, lookback=RANGE_LOOKBACK, effort_mult=EFFORT_MULTIPLIER):
     """UPTHRUST: narx diapazon yuqori chegarasidan soxta chiqib, qaytib kiradi,
-    va bu hajm bilan tasdiqlanadi."""
+    va bu KUCHLI HARAKAT (o'rtachadan kattaroq svecha) bilan tasdiqlanadi."""
     if len(df) < lookback + 1:
         return None
 
@@ -171,20 +176,21 @@ def detect_upthrust(df, lookback=RANGE_LOOKBACK, vol_mult=VOLUME_MULTIPLIER):
 
     range_low = window["low"].min()
     range_high = window["high"].max()
-    avg_volume = window["volume"].mean()
+    avg_candle_range = (window["high"] - window["low"]).mean()
+    current_candle_range = current["high"] - current["low"]
 
     is_false_breakout = current["high"] > range_high and current["close"] < range_high
-    is_volume_confirmed = avg_volume > 0 and current["volume"] > avg_volume * vol_mult
+    is_effort_confirmed = avg_candle_range > 0 and current_candle_range > avg_candle_range * effort_mult
 
-    if is_false_breakout and is_volume_confirmed:
+    if is_false_breakout and is_effort_confirmed:
         return {
             "type": "upthrust",
             "range_low": range_low,
             "range_high": range_high,
             "candle_high": current["high"],
             "candle_close": current["close"],
-            "volume": current["volume"],
-            "avg_volume": avg_volume,
+            "candle_range": current_candle_range,
+            "avg_candle_range": avg_candle_range,
             "time": str(current.name),
         }
     return None
@@ -266,11 +272,10 @@ def make_chart_image(df, path="/tmp/chart.png"):
     mpf.plot(
         df,
         type="candle",
-        volume=True,
+        volume=False,
         style=style,
         title="\nXAUUSD - so'nggi 100 ta 5 daqiqalik sveча",
         ylabel="Narx (USD)",
-        ylabel_lower="Hajm",
         figsize=(16, 9),
         tight_layout=True,
         scale_padding={"left": 0.3, "right": 0.7, "top": 0.8, "bottom": 0.5},
@@ -297,15 +302,19 @@ def analyze_with_claude(chart_path, price_data, headlines, signal):
         signal_desc = (
             f"SPRING (Wyckoff) — narx {signal['range_low']:.2f} diapazon pastki chegarasidan "
             f"soxta chiqib ({signal['candle_low']:.2f} gacha tushib), qaytib {signal['candle_close']:.2f} "
-            f"darajasida yopilgan. Hajm {signal['volume']:.0f}, o'rtacha hajmdan "
-            f"({signal['avg_volume']:.0f}) sezilarli yuqori."
+            f"darajasida yopilgan. Svecha kattaligi (high-low) {signal['candle_range']:.2f}, "
+            f"o'rtacha svecha kattaligidan ({signal['avg_candle_range']:.2f}) sezilarli katta — "
+            f"bu kuchli, keskin harakatni bildiradi (XAUUSD'da haqiqiy savdo hajmi mavjud emasligi "
+            f"sababli, svecha kattaligi 'effort' o'lchovi sifatida ishlatiladi)."
         )
     else:
         signal_desc = (
             f"UPTHRUST (Wyckoff) — narx {signal['range_high']:.2f} diapazon yuqori chegarasidan "
             f"soxta chiqib ({signal['candle_high']:.2f} gacha ko'tarilib), qaytib {signal['candle_close']:.2f} "
-            f"darajasida yopilgan. Hajm {signal['volume']:.0f}, o'rtacha hajmdan "
-            f"({signal['avg_volume']:.0f}) sezilarli yuqori."
+            f"darajasida yopilgan. Svecha kattaligi (high-low) {signal['candle_range']:.2f}, "
+            f"o'rtacha svecha kattaligidan ({signal['avg_candle_range']:.2f}) sezilarli katta — "
+            f"bu kuchli, keskin harakatni bildiradi (XAUUSD'da haqiqiy savdo hajmi mavjud emasligi "
+            f"sababli, svecha kattaligi 'effort' o'lchovi sifatida ishlatiladi)."
         )
 
     prompt = f"""Sen SMC/ICT/Wyckoff va hajm tahliliga ixtisoslashgan treyder-tahlilchisan.
@@ -426,7 +435,7 @@ def run_signal_check(df, price_data):
         f"{emoji} {label}\n"
         f"Narx: {price_data['price']} USD\n"
         f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
-        f"Hajm: {signal['volume']:.0f} (o'rtacha: {signal['avg_volume']:.0f})"
+        f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
     )
     send_telegram_document(chart_path, caption=caption)
 
@@ -502,10 +511,6 @@ def main():
     except Exception as e:
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik: {e}")
         sys.exit(1)
-
-    # DEBUG: hajm ma'lumoti haqiqatan kelayotganini tekshirish uchun (Render Logs'da ko'rinadi)
-    print("So'nggi 10 ta sveчaning narx va hajm ma'lumoti:")
-    print(candles_df[["close", "volume"]].tail(10))
 
     if mode == "signal":
         run_signal_check(candles_df, price_data)
