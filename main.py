@@ -196,6 +196,97 @@ def detect_upthrust(df, lookback=RANGE_LOOKBACK, effort_mult=EFFORT_MULTIPLIER):
     return None
 
 
+def find_swing_points(highs, lows, window=3, exclude_last=True):
+    """Har bir nuqta atrofida (window ta oldin, window ta keyin) eng yuqori/past
+    bo'lsa, uni tasdiqlangan swing high/low deb belgilaydi."""
+    n = len(highs)
+    swing_high_idx, swing_low_idx = [], []
+    end = n - 1 if exclude_last else n
+    for i in range(window, end):
+        lo = max(0, i - window)
+        hi = min(n, i + window + 1)
+        if highs[i] == highs[lo:hi].max():
+            swing_high_idx.append(i)
+        if lows[i] == lows[lo:hi].min():
+            swing_low_idx.append(i)
+    return swing_high_idx, swing_low_idx
+
+
+def detect_smc_composite(df, swing_window=3, lookback=40):
+    """ENG KUCHLI SMC/ICT signal: Liquidity Sweep + FVG + BOS/CHoCH ketma-ketligi.
+    Faqat BOS/CHoCH aynan JORIY (oxirgi) svechada tasdiqlansa signal beradi —
+    shu bilan har bir voqea faqat bir marta xabar qilinadi."""
+    if len(df) < lookback:
+        return None
+
+    sub = df.iloc[-lookback:]
+    highs = sub["high"].values
+    lows = sub["low"].values
+    closes = sub["close"].values
+    times = sub.index
+    n = len(sub)
+    cur = n - 1
+
+    swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=swing_window, exclude_last=True)
+    if not swing_high_idx or not swing_low_idx:
+        return None
+
+    prior_highs_before = lambda idx: [i for i in swing_high_idx if i < idx]
+    prior_lows_before = lambda idx: [i for i in swing_low_idx if i < idx]
+
+    # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
+    ph = prior_highs_before(cur)
+    if ph:
+        last_swing_high = highs[ph[-1]]
+        if closes[cur] > last_swing_high:
+            # FVG qidiramiz (joriy svechadan oldin): lows[j] > highs[j-2]
+            fvg_idx = None
+            for j in range(swing_window, cur):
+                if j >= 2 and lows[j] > highs[j - 2]:
+                    fvg_idx = j
+            if fvg_idx is not None:
+                # Sweep qidiramiz (FVG'dan oldin): past nuqta swing low'dan pastga tushib, qaytgan
+                for k in range(swing_window, fvg_idx):
+                    pl = prior_lows_before(k)
+                    if pl:
+                        sl = lows[pl[-1]]
+                        if lows[k] < sl and closes[k] > sl:
+                            return {
+                                "type": "smc_bullish",
+                                "sweep_time": str(times[k]),
+                                "sweep_level": sl,
+                                "fvg_time": str(times[fvg_idx]),
+                                "bos_level": last_swing_high,
+                                "current_close": closes[cur],
+                            }
+
+    # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga (joriy svechada) ---
+    pl2 = prior_lows_before(cur)
+    if pl2:
+        last_swing_low = lows[pl2[-1]]
+        if closes[cur] < last_swing_low:
+            fvg_idx = None
+            for j in range(swing_window, cur):
+                if j >= 2 and highs[j] < lows[j - 2]:
+                    fvg_idx = j
+            if fvg_idx is not None:
+                for k in range(swing_window, fvg_idx):
+                    ph2 = prior_highs_before(k)
+                    if ph2:
+                        sh = highs[ph2[-1]]
+                        if highs[k] > sh and closes[k] < sh:
+                            return {
+                                "type": "smc_bearish",
+                                "sweep_time": str(times[k]),
+                                "sweep_level": sh,
+                                "fvg_time": str(times[fvg_idx]),
+                                "bos_level": last_swing_low,
+                                "current_close": closes[cur],
+                            }
+
+    return None
+
+
 def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
     """Joriy holat qanday diapazon/uchburchak turiga to'g'ri kelishini aniqlaydi:
     - bullish_squeeze: pastki chegara ko'tarilib, yuqoriga qisilmoqda
@@ -252,7 +343,7 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 # GRAFIK CHIZISH
 # ============================================================================
 
-def make_chart_image(df, path="/tmp/chart.png"):
+def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi."""
     import mplfinance as mpf
 
@@ -274,7 +365,7 @@ def make_chart_image(df, path="/tmp/chart.png"):
         type="candle",
         volume=False,
         style=style,
-        title="\nXAUUSD - so'nggi 100 ta 5 daqiqalik sveча",
+        title=f"\nXAUUSD - so'nggi {len(df)} ta {interval} sveча",
         ylabel="Narx (USD)",
         figsize=(16, 9),
         tight_layout=True,
@@ -298,7 +389,25 @@ def analyze_with_claude(chart_path, price_data, headlines, signal):
     with open(chart_path, "rb") as f:
         image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    if signal["type"] == "spring":
+    if signal["type"] == "smc_bullish":
+        signal_desc = (
+            f"KUCHLI SIGNAL — Liquidity Sweep + FVG + BOS (BULLISH): "
+            f"narx avval {signal['sweep_level']:.2f} darajasidagi (sotuvchilar likvidligi) "
+            f"nuqtani sweep qilgan, so'ngra Fair Value Gap (bo'shliq) hosil bo'lgan, "
+            f"va yakunda {signal['bos_level']:.2f} darajasini yuqoriga sindirib (BOS), "
+            f"{signal['current_close']:.2f} darajasida yopilgan. Bu uchta ICT konsepti "
+            f"(sweep + FVG + BOS) ketma-ket bajarilgani — yuqori ishonchli bullish signal deb hisoblanadi."
+        )
+    elif signal["type"] == "smc_bearish":
+        signal_desc = (
+            f"KUCHLI SIGNAL — Liquidity Sweep + FVG + BOS (BEARISH): "
+            f"narx avval {signal['sweep_level']:.2f} darajasidagi (xaridorlar likvidligi) "
+            f"nuqtani sweep qilgan, so'ngra Fair Value Gap (bo'shliq) hosil bo'lgan, "
+            f"va yakunda {signal['bos_level']:.2f} darajasini pastga sindirib (BOS), "
+            f"{signal['current_close']:.2f} darajasida yopilgan. Bu uchta ICT konsepti "
+            f"(sweep + FVG + BOS) ketma-ket bajarilgani — yuqori ishonchli bearish signal deb hisoblanadi."
+        )
+    elif signal["type"] == "spring":
         signal_desc = (
             f"SPRING (Wyckoff) — narx {signal['range_low']:.2f} diapazon pastki chegarasidan "
             f"soxta chiqib ({signal['candle_low']:.2f} gacha tushib), qaytib {signal['candle_close']:.2f} "
@@ -402,16 +511,18 @@ def send_telegram_document(file_path, caption=""):
 # REJIM 1: SIGNAL TEKSHIRUV (har 5 daqiqada)
 # ============================================================================
 
-def run_signal_check(df, price_data):
-    spring = detect_spring(df)
-    upthrust = detect_upthrust(df)
-    signal = spring or upthrust
+def run_signal_check(df, price_data, interval="5min"):
+    # Eng kuchli signal birinchi tekshiriladi — agar u chiqsa, boshqalar tekshirilmaydi
+    smc = detect_smc_composite(df, lookback=144)
+    spring = None if smc else detect_spring(df)
+    upthrust = None if (smc or spring) else detect_upthrust(df)
+    signal = smc or spring or upthrust
 
     if not signal:
-        print("Signal yo'q — jim chiqamiz.")
+        print(f"[{interval}] Signal yo'q — jim chiqamiz.")
         return
 
-    chart_path = make_chart_image(df)
+    chart_path = make_chart_image(df.tail(100), interval=interval)
 
     news_error = None
     total_results = None
@@ -426,17 +537,41 @@ def run_signal_check(df, price_data):
     except Exception as e:
         analysis = f"(AI tahlili olinmadi: {e})"
 
-    if signal["type"] == "spring":
-        emoji, label = "🟢", "SPRING (pastga soxta sinish -> mumkin bo'lgan ko'tarilish)"
-    else:
-        emoji, label = "🔴", "UPTHRUST (yuqoriga soxta sinish -> mumkin bo'lgan tushish)"
+    tf_tag = f"[{interval}]"
 
-    caption = (
-        f"{emoji} {label}\n"
-        f"Narx: {price_data['price']} USD\n"
-        f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
-        f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
-    )
+    if signal["type"] == "smc_bullish":
+        emoji, label = "🔥🟢", f"{tf_tag} KUCHLI SIGNAL: Liquidity Sweep + FVG + BOS (BULLISH)"
+        caption = (
+            f"{emoji} {label}\n"
+            f"Narx: {price_data['price']} USD\n"
+            f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
+            f"BOS darajasi: {signal['bos_level']:.2f} (yopilish: {signal['current_close']:.2f})"
+        )
+    elif signal["type"] == "smc_bearish":
+        emoji, label = "🔥🔴", f"{tf_tag} KUCHLI SIGNAL: Liquidity Sweep + FVG + BOS (BEARISH)"
+        caption = (
+            f"{emoji} {label}\n"
+            f"Narx: {price_data['price']} USD\n"
+            f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
+            f"BOS darajasi: {signal['bos_level']:.2f} (yopilish: {signal['current_close']:.2f})"
+        )
+    elif signal["type"] == "spring":
+        emoji, label = "🟢", f"{tf_tag} SPRING (pastga soxta sinish -> mumkin bo'lgan ko'tarilish)"
+        caption = (
+            f"{emoji} {label}\n"
+            f"Narx: {price_data['price']} USD\n"
+            f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+            f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
+        )
+    else:
+        emoji, label = "🔴", f"{tf_tag} UPTHRUST (yuqoriga soxta sinish -> mumkin bo'lgan tushish)"
+        caption = (
+            f"{emoji} {label}\n"
+            f"Narx: {price_data['price']} USD\n"
+            f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+            f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
+        )
+
     send_telegram_document(chart_path, caption=caption)
 
     full_analysis = f"📊 AI Tahlili:\n\n{analysis}"
@@ -463,10 +598,10 @@ RANGE_TYPE_NAMES = {
 }
 
 
-def run_hourly_status(df, price_data):
+def run_hourly_status(df, price_data, interval="5min"):
     lookback = RANGE_LOOKBACK
     if len(df) < lookback + 1:
-        send_telegram_message("🕐 Soatlik holat: ma'lumot yetarli emas.")
+        send_telegram_message(f"🕐 [{interval}] Soatlik holat: ma'lumot yetarli emas.")
         return
 
     window = df.iloc[-(lookback + 1):-1]
@@ -476,7 +611,7 @@ def run_hourly_status(df, price_data):
     range_state = detect_range_state(df, lookback=lookback)
 
     lines = [
-        "🕐 Soatlik holat",
+        f"🕐 [{interval}] Soatlik holat",
         f"Narx: {price_data['price']} USD",
         f"Diapazon (so'nggi {lookback} sveча): {range_low:.2f} – {range_high:.2f}",
     ]
@@ -489,7 +624,7 @@ def run_hourly_status(df, price_data):
     lines.append("\nSignal: Hozircha spring/upthrust aniqlanmadi (aniqlansa alohida xabar keladi)")
 
     send_telegram_message("\n".join(lines))
-    print("Soatlik holat yuborildi.")
+    print(f"[{interval}] Soatlik holat yuborildi.")
 
 
 # ============================================================================
@@ -499,6 +634,7 @@ def run_hourly_status(df, price_data):
 def main():
     check_env_vars()
     mode = sys.argv[1] if len(sys.argv) > 1 else "signal"
+    interval = sys.argv[2] if len(sys.argv) > 2 else "5min"
 
     try:
         price_data = get_gold_price()
@@ -507,15 +643,15 @@ def main():
         sys.exit(1)
 
     try:
-        candles_df = get_gold_candles(interval="5min", outputsize=100)
+        candles_df = get_gold_candles(interval=interval, outputsize=160)
     except Exception as e:
-        send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik: {e}")
+        send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik ({interval}): {e}")
         sys.exit(1)
 
     if mode == "signal":
-        run_signal_check(candles_df, price_data)
+        run_signal_check(candles_df, price_data, interval=interval)
     elif mode == "status":
-        run_hourly_status(candles_df, price_data)
+        run_hourly_status(candles_df, price_data, interval=interval)
     else:
         print(f"Noma'lum rejim: {mode}. 'signal' yoki 'status' bo'lishi kerak.")
         sys.exit(1)
