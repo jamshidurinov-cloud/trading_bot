@@ -129,6 +129,47 @@ def get_gold_news():
     return headlines, total_results
 
 
+def get_forex_calendar_events(hours_ahead=24):
+    """Forex Factory'ning ochiq JSON kalendaridan yaqin soatlardagi yuqori ta'sirli
+    USD iqtisodiy yangiliklarini oladi (Fed, NFP, CPI kabi — bular XAUUSD'ga eng
+    ko'p ta'sir qiladigan voqealar). Diqqat: bu manzilga 5 daqiqada faqat 2 marta
+    so'rov yuborish mumkin — shuning uchun faqat soatlik status rejimida chaqiriladi."""
+    import datetime as dt
+    from dateutil import parser as date_parser
+
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+
+    text = resp.text.strip()
+    if text.startswith("<") or "Request Denied" in text:
+        raise RuntimeError("Forex Factory limitga tegib qoldi (5 daqiqada 2 so'rovdan ko'p)")
+
+    events = resp.json()
+    now = dt.datetime.now(dt.timezone.utc)
+    horizon = now + dt.timedelta(hours=hours_ahead)
+
+    result = []
+    for e in events:
+        try:
+            event_time = date_parser.parse(e.get("date", ""))
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=dt.timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        if e.get("country") == "USD" and e.get("impact") == "High" and now <= event_time <= horizon:
+            result.append({
+                "title": e.get("title", "Noma'lum voqea"),
+                "time": event_time,
+                "forecast": e.get("forecast", ""),
+                "previous": e.get("previous", ""),
+            })
+
+    result.sort(key=lambda x: x["time"])
+    return result
+
+
 # ============================================================================
 # QOIDA DVIGATELI - Wyckoff Spring / Upthrust / Range holati
 # ============================================================================
@@ -622,6 +663,21 @@ def run_hourly_status(df, price_data, interval="5min"):
         lines.append("\n📐 Holat: Aniq diapazon/uchburchak shakli yo'q (trend/keng harakat)")
 
     lines.append("\nSignal: Hozircha spring/upthrust aniqlanmadi (aniqlansa alohida xabar keladi)")
+
+    try:
+        events = get_forex_calendar_events(hours_ahead=24)
+        if events:
+            lines.append("\n📅 Yaqin 24 soatdagi muhim USD yangiliklari:")
+            for e in events[:5]:
+                time_str = e["time"].strftime("%d.%m %H:%M UTC")
+                extra = ""
+                if e["forecast"] or e["previous"]:
+                    extra = f" (bashorat: {e['forecast']}, oldingi: {e['previous']})"
+                lines.append(f"- {time_str} — {e['title']}{extra}")
+        else:
+            lines.append("\n📅 Yaqin 24 soatda yuqori ta'sirli USD yangiligi yo'q.")
+    except Exception as e:
+        lines.append(f"\n⚠️ Kalendar ma'lumoti olinmadi: {e}")
 
     send_telegram_message("\n".join(lines))
     print(f"[{interval}] Soatlik holat yuborildi.")
