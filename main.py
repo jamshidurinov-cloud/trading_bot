@@ -279,7 +279,8 @@ def detect_smc_composite(df, swing_window=3, lookback=40):
     ph = prior_highs_before(cur)
     if ph:
         last_swing_high = highs[ph[-1]]
-        if closes[cur] > last_swing_high:
+        is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
+        if is_fresh_break:
             # FVG qidiramiz (joriy svechadan oldin): lows[j] > highs[j-2]
             fvg_idx = None
             for j in range(swing_window, cur):
@@ -305,7 +306,8 @@ def detect_smc_composite(df, swing_window=3, lookback=40):
     pl2 = prior_lows_before(cur)
     if pl2:
         last_swing_low = lows[pl2[-1]]
-        if closes[cur] < last_swing_low:
+        is_fresh_break = closes[cur] < last_swing_low and closes[cur - 1] >= last_swing_low
+        if is_fresh_break:
             fvg_idx = None
             for j in range(swing_window, cur):
                 if j >= 2 and highs[j] < lows[j - 2]:
