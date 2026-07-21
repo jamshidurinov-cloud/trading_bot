@@ -517,7 +517,8 @@ So'nggi yangiliklar (sarlavhalar):
         },
         timeout=60,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        raise RuntimeError(f"Anthropic API xatosi ({resp.status_code}): {resp.text[:500]}")
     data = resp.json()
     text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
     return "\n".join(text_blocks).strip()
