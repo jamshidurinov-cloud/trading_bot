@@ -330,6 +330,24 @@ def detect_smc_composite(df, swing_window=3, lookback=40):
     return None
 
 
+def get_trend_bias(df, period=50, threshold_pct=0.05):
+    """Mavjud ma'lumot asosida (qo'shimcha API so'rovisiz) umumiy trend yo'nalishini
+    taxminan aniqlaydi: joriy narxni so'nggi `period` sveчaning o'rtacha narxi bilan
+    solishtiradi. Bu haqiqiy yuqori timeframe emas, balki tezkor va bepul proksi."""
+    if len(df) < period:
+        return "neutral"
+    sma = df["close"].tail(period).mean()
+    current = df["close"].iloc[-1]
+    if sma == 0:
+        return "neutral"
+    diff_pct = (current - sma) / sma * 100
+    if diff_pct > threshold_pct:
+        return "bullish"
+    elif diff_pct < -threshold_pct:
+        return "bearish"
+    return "neutral"
+
+
 def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
     """Joriy holat qanday diapazon/uchburchak turiga to'g'ri kelishini aniqlaydi:
     - bullish_squeeze: pastki chegara ko'tarilib, yuqoriga qisilmoqda
@@ -582,6 +600,16 @@ def run_signal_check(df, price_data, interval="5min"):
         analysis = f"(AI tahlili olinmadi: {e})"
 
     tf_tag = f"[{interval}]"
+    bias = get_trend_bias(df)
+    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
+    trend_warning = ""
+    if bias != "neutral" and bias != signal_direction:
+        bias_uz = "YUQORIGA (bullish)" if bias == "bullish" else "PASTGA (bearish)"
+        trend_warning = (
+            f"\n\n⚠️ DIQQAT: umumiy narx harakati {bias_uz} yo'nalishda "
+            f"(so'nggi {min(50, len(df))} sveчa o'rtachasiga nisbatan) — bu signal "
+            f"UMUMIY TREND'GA QARSHI bo'lishi mumkin, ehtiyot bo'ling."
+        )
 
     if signal["type"] == "smc_bullish":
         emoji, label = "🔥🟢", f"{tf_tag} KUCHLI SIGNAL: Liquidity Sweep + FVG + BOS (BULLISH)"
@@ -616,6 +644,7 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
         )
 
+    caption += trend_warning
     send_telegram_document(chart_path, caption=caption)
 
     full_analysis = f"📊 AI Tahlili:\n\n{analysis}"
