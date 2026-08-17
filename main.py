@@ -19,14 +19,14 @@ import requests
 # ---------- Sozlamalar (Render'da Environment Variables sifatida kiritiladi) ----------
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 NEWSAPI_API_KEY = os.environ.get("NEWSAPI_API_KEY")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")      # signal tracking uchun (Gist)
+GIST_ID = os.environ.get("GIST_ID")                # signal tracking uchun (Gist)
 
 REQUIRED_VARS = {
     "TWELVEDATA_API_KEY": TWELVEDATA_API_KEY,
     "NEWSAPI_API_KEY": NEWSAPI_API_KEY,
-    "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
     "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
     "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
 }
@@ -437,109 +437,134 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
 
 
 # ============================================================================
-# AI TAHLIL (faqat signal chiqqanda chaqiriladi)
+# SIGNAL TRACKING (GitHub Gist orqali - Cron Job'lar orasida "yodda tutish" uchun)
 # ============================================================================
+# Render Cron Job'lari har safar yangidan boshlanadi (hech narsani "yodda tutmaydi"),
+# shuning uchun signal tarixini tashqi joyda (kichik GitHub Gist fayli) saqlaymiz.
+# Agar GITHUB_TOKEN/GIST_ID sozlanmagan bo'lsa, tracking jim o'tkazib yuboriladi
+# (bot signal berishda davom etadi, faqat statistika yig'ilmaydi).
 
-def analyze_with_claude(chart_path, price_data, headlines, signal):
-    """Grafik, narx, aniqlangan signal va yangiliklarni Claude API'ga yuborib,
-    signalni tasdiqlovchi/rad etuvchi qisqa tahlil oldiradi."""
-    import base64
+GIST_API_URL = "https://api.github.com/gists"
+CHECK_AFTER_MINUTES = 60   # signal chiqqandan necha daqiqadan keyin natijasini tekshirish
+OUTCOME_THRESHOLD_PCT = 0.05  # neytral/g'olib/mag'lub chegarasi (narx foizda necha % siljishi kerak)
 
-    news_text = "\n".join(headlines) if headlines else "Yangilik topilmadi."
 
-    with open(chart_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
+def tracking_enabled():
+    return bool(GITHUB_TOKEN and GIST_ID)
 
-    if signal["type"] == "smc_bullish":
-        signal_desc = (
-            f"KUCHLI SIGNAL — Liquidity Sweep + FVG + BOS (BULLISH): "
-            f"narx avval {signal['sweep_level']:.2f} darajasidagi (sotuvchilar likvidligi) "
-            f"nuqtani sweep qilgan, so'ngra Fair Value Gap (bo'shliq) hosil bo'lgan, "
-            f"va yakunda {signal['bos_level']:.2f} darajasini yuqoriga sindirib (BOS), "
-            f"{signal['current_close']:.2f} darajasida yopilgan. Bu uchta ICT konsepti "
-            f"(sweep + FVG + BOS) ketma-ket bajarilgani — yuqori ishonchli bullish signal deb hisoblanadi."
+
+def load_signal_log():
+    """Gist'dan signal tarixini o'qiydi. Muammo bo'lsa bo'sh ro'yxat qaytaradi."""
+    if not tracking_enabled():
+        return []
+    try:
+        resp = requests.get(
+            f"{GIST_API_URL}/{GIST_ID}",
+            headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"},
+            timeout=15,
         )
-    elif signal["type"] == "smc_bearish":
-        signal_desc = (
-            f"KUCHLI SIGNAL — Liquidity Sweep + FVG + BOS (BEARISH): "
-            f"narx avval {signal['sweep_level']:.2f} darajasidagi (xaridorlar likvidligi) "
-            f"nuqtani sweep qilgan, so'ngra Fair Value Gap (bo'shliq) hosil bo'lgan, "
-            f"va yakunda {signal['bos_level']:.2f} darajasini pastga sindirib (BOS), "
-            f"{signal['current_close']:.2f} darajasida yopilgan. Bu uchta ICT konsepti "
-            f"(sweep + FVG + BOS) ketma-ket bajarilgani — yuqori ishonchli bearish signal deb hisoblanadi."
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["files"]["signals.json"]["content"]
+        import json
+        return json.loads(content)
+    except Exception as e:
+        print(f"Signal logni o'qishda xatolik: {e}")
+        return []
+
+
+def save_signal_log(log):
+    """Signal tarixini Gist'ga qaytadan yozadi."""
+    if not tracking_enabled():
+        return
+    import json
+    try:
+        resp = requests.patch(
+            f"{GIST_API_URL}/{GIST_ID}",
+            headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"},
+            json={"files": {"signals.json": {"content": json.dumps(log, indent=2, ensure_ascii=False)}}},
+            timeout=15,
         )
-    elif signal["type"] == "spring":
-        signal_desc = (
-            f"SPRING (Wyckoff) — narx {signal['range_low']:.2f} diapazon pastki chegarasidan "
-            f"soxta chiqib ({signal['candle_low']:.2f} gacha tushib), qaytib {signal['candle_close']:.2f} "
-            f"darajasida yopilgan. Svecha kattaligi (high-low) {signal['candle_range']:.2f}, "
-            f"o'rtacha svecha kattaligidan ({signal['avg_candle_range']:.2f}) sezilarli katta — "
-            f"bu kuchli, keskin harakatni bildiradi (XAUUSD'da haqiqiy savdo hajmi mavjud emasligi "
-            f"sababli, svecha kattaligi 'effort' o'lchovi sifatida ishlatiladi)."
-        )
-    else:
-        signal_desc = (
-            f"UPTHRUST (Wyckoff) — narx {signal['range_high']:.2f} diapazon yuqori chegarasidan "
-            f"soxta chiqib ({signal['candle_high']:.2f} gacha ko'tarilib), qaytib {signal['candle_close']:.2f} "
-            f"darajasida yopilgan. Svecha kattaligi (high-low) {signal['candle_range']:.2f}, "
-            f"o'rtacha svecha kattaligidan ({signal['avg_candle_range']:.2f}) sezilarli katta — "
-            f"bu kuchli, keskin harakatni bildiradi (XAUUSD'da haqiqiy savdo hajmi mavjud emasligi "
-            f"sababli, svecha kattaligi 'effort' o'lchovi sifatida ishlatiladi)."
-        )
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Signal logni saqlashda xatolik: {e}")
 
-    prompt = f"""Sen SMC/ICT/Wyckoff va hajm tahliliga ixtisoslashgan treyder-tahlilchisan.
 
-Kod avtomatik ravishda quyidagi signalni aniqladi:
-{signal_desc}
+def log_new_signal(signal, price_data, interval):
+    """Yangi chiqqan signalni tarixga qo'shadi (natijasi keyinroq tekshiriladi)."""
+    if not tracking_enabled():
+        return
+    import datetime as dt
 
-Ilova qilingan XAUUSD grafigini ko'rib:
-1. Shu signalni TASDIQLA yoki unga SHUBHA bildir (nima uchun ishonchli/ishonchsiz)
-2. Liquidity va order block nuqtai nazaridan qo'shimcha kontekst ber
-3. Quyida berilgan so'nggi yangiliklarni sharhla — ular ushbu signalga mos keladimi
-   yoki qarama-qarshimi (masalan signal bullish, lekin yangilik bearish bo'lsa, buni ayt)
+    direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
+    log = load_signal_log()
+    log.append({
+        "time": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "type": signal["type"],
+        "interval": interval,
+        "direction": direction,
+        "entry_price": price_data["price"],
+        "checked": False,
+        "outcome": None,
+    })
+    save_signal_log(log)
 
-Javobni o'zbek tilida, Telegram xabari uchun mos, qisqa va aniq formatda yoz.
-Bashorat yoki "sotib ol/sot" tavsiyasi berma — faqat texnik kuzatuv va yangilik konteksti ber.
-Oxirida "Bu tavsiya emas, faqat texnik kuzatuv" deb yoz.
 
-Qo'shimcha ma'lumot:
-Joriy narx: {price_data['price']}
-O'zgarish: {price_data['change']} ({price_data['percent_change']}%)
+def evaluate_pending_signals(current_price):
+    """Muddati o'tgan, hali tekshirilmagan signallarni tekshirib, g'olib/mag'lub/neytral
+    deb belgilaydi. Umumiy statistikani qaytaradi."""
+    if not tracking_enabled():
+        return None
 
-So'nggi yangiliklar (sarlavhalar):
-{news_text}
-"""
+    import datetime as dt
 
-    resp = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": "claude-sonnet-5",
-            "max_tokens": 1000,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {"type": "base64", "media_type": "image/png", "data": image_b64},
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        },
-        timeout=60,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Anthropic API xatosi ({resp.status_code}): {resp.text[:500]}")
-    data = resp.json()
-    text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-    return "\n".join(text_blocks).strip()
+    log = load_signal_log()
+    now = dt.datetime.now(dt.timezone.utc)
+    changed = False
+
+    for entry in log:
+        if entry.get("checked"):
+            continue
+        try:
+            signal_time = dt.datetime.fromisoformat(entry["time"])
+        except (ValueError, KeyError):
+            continue
+
+        if (now - signal_time).total_seconds() < CHECK_AFTER_MINUTES * 60:
+            continue  # hali muddati kelmagan
+
+        entry_price = entry["entry_price"]
+        pct_change = (current_price - entry_price) / entry_price * 100
+
+        if entry["direction"] == "bullish":
+            outcome = "win" if pct_change > OUTCOME_THRESHOLD_PCT else (
+                "loss" if pct_change < -OUTCOME_THRESHOLD_PCT else "neutral")
+        else:
+            outcome = "win" if pct_change < -OUTCOME_THRESHOLD_PCT else (
+                "loss" if pct_change > OUTCOME_THRESHOLD_PCT else "neutral")
+
+        entry["checked"] = True
+        entry["outcome"] = outcome
+        changed = True
+
+    if changed:
+        save_signal_log(log)
+
+    checked = [e for e in log if e.get("checked")]
+    wins = sum(1 for e in checked if e["outcome"] == "win")
+    losses = sum(1 for e in checked if e["outcome"] == "loss")
+    neutral = sum(1 for e in checked if e["outcome"] == "neutral")
+    total = len(checked)
+    win_rate = round(wins / total * 100, 1) if total else None
+
+    return {
+        "total_checked": total,
+        "wins": wins,
+        "losses": losses,
+        "neutral": neutral,
+        "win_rate": win_rate,
+        "pending": len(log) - total,
+    }
 
 
 # ============================================================================
@@ -594,11 +619,6 @@ def run_signal_check(df, price_data, interval="5min"):
         news_error = str(e)
         headlines = []
 
-    try:
-        analysis = analyze_with_claude(chart_path, price_data, headlines, signal)
-    except Exception as e:
-        analysis = f"(AI tahlili olinmadi: {e})"
-
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
     signal_direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
@@ -647,15 +667,18 @@ def run_signal_check(df, price_data, interval="5min"):
     caption += trend_warning
     send_telegram_document(chart_path, caption=caption)
 
-    full_analysis = f"📊 AI Tahlili:\n\n{analysis}"
+    # Yangiliklar - endi AI sharhisiz, oddiy ro'yxat sifatida
     if news_error:
-        full_analysis += f"\n\n⚠️ Yangilik olinmadi (xatolik): {news_error}"
+        news_msg = f"⚠️ Yangilik olinmadi (xatolik): {news_error}"
     elif not headlines:
-        full_analysis += f"\n\nℹ️ Yangilik topilmadi (NewsAPI natijasi: {total_results} ta maqola)."
+        news_msg = f"ℹ️ Yangilik topilmadi (NewsAPI natijasi: {total_results} ta maqola)."
     else:
-        full_analysis += f"\n\nℹ️ Tahlilda ishlatilgan yangiliklar soni: {len(headlines)}"
+        news_msg = "📰 So'nggi yangiliklar:\n" + "\n".join(headlines)
+    send_telegram_message(news_msg)
 
-    send_telegram_message(full_analysis)
+    # Signal tarixga yoziladi - natijasi keyinroq (soatlik status'da) tekshiriladi
+    log_new_signal(signal, price_data, interval)
+
     print(f"{label} signali yuborildi.")
 
 
@@ -710,6 +733,22 @@ def run_hourly_status(df, price_data, interval="5min"):
             lines.append("\n📅 Yaqin 24 soatda yuqori ta'sirli USD yangiligi yo'q.")
     except Exception as e:
         lines.append(f"\n⚠️ Kalendar ma'lumoti olinmadi: {e}")
+
+    if tracking_enabled():
+        try:
+            stats = evaluate_pending_signals(price_data["price"])
+            if stats and stats["total_checked"] > 0:
+                lines.append(
+                    f"\n📈 Signal statistikasi: {stats['total_checked']} ta signal tekshirildi — "
+                    f"✅ {stats['wins']} g'olib, ❌ {stats['losses']} mag'lub, "
+                    f"➖ {stats['neutral']} neytral (aniqlik: {stats['win_rate']}%)"
+                )
+                if stats["pending"] > 0:
+                    lines.append(f"⏳ Hali natijasi kutilayotgan signallar: {stats['pending']}")
+            elif stats:
+                lines.append(f"\n📈 Signal statistikasi: hali yetarli tekshirilgan signal yo'q (kutilmoqda: {stats['pending']}).")
+        except Exception as e:
+            lines.append(f"\n⚠️ Signal statistikasini olishda xatolik: {e}")
 
     send_telegram_message("\n".join(lines))
     print(f"[{interval}] Soatlik holat yuborildi.")
