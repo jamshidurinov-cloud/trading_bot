@@ -18,7 +18,6 @@ import requests
 
 # ---------- Sozlamalar (Render'da Environment Variables sifatida kiritiladi) ----------
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
-NEWSAPI_API_KEY = os.environ.get("NEWSAPI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")      # signal tracking uchun (Gist)
@@ -26,7 +25,6 @@ GIST_ID = os.environ.get("GIST_ID")                # signal tracking uchun (Gist
 
 REQUIRED_VARS = {
     "TWELVEDATA_API_KEY": TWELVEDATA_API_KEY,
-    "NEWSAPI_API_KEY": NEWSAPI_API_KEY,
     "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
     "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
 }
@@ -99,34 +97,6 @@ def get_gold_candles(interval="5min", outputsize=100):
 
     return df
 
-
-def get_gold_news():
-    """NewsAPI orqali oltin/XAUUSD'ga aloqador so'nggi yangiliklarni oladi."""
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": "gold price OR XAUUSD OR bullion",
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": 5,
-        "apiKey": NEWSAPI_API_KEY,
-    }
-    resp = requests.get(url, params=params, timeout=15)
-    data = resp.json()
-
-    if data.get("status") == "error":
-        raise RuntimeError(f"NewsAPI xatosi ({data.get('code')}): {data.get('message')}")
-    resp.raise_for_status()
-
-    total_results = data.get("totalResults", 0)
-    articles = data.get("articles", [])
-    headlines = []
-    for a in articles[:5]:
-        title = a.get("title", "")
-        source = a.get("source", {}).get("name", "")
-        if title:
-            headlines.append(f"- {title} ({source})")
-
-    return headlines, total_results
 
 
 def get_forex_calendar_events(hours_ahead=24):
@@ -611,14 +581,6 @@ def run_signal_check(df, price_data, interval="5min"):
 
     chart_path = make_chart_image(df.tail(100), interval=interval)
 
-    news_error = None
-    total_results = None
-    try:
-        headlines, total_results = get_gold_news()
-    except Exception as e:
-        news_error = str(e)
-        headlines = []
-
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
     signal_direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
@@ -666,15 +628,6 @@ def run_signal_check(df, price_data, interval="5min"):
 
     caption += trend_warning
     send_telegram_document(chart_path, caption=caption)
-
-    # Yangiliklar - endi AI sharhisiz, oddiy ro'yxat sifatida
-    if news_error:
-        news_msg = f"⚠️ Yangilik olinmadi (xatolik): {news_error}"
-    elif not headlines:
-        news_msg = f"ℹ️ Yangilik topilmadi (NewsAPI natijasi: {total_results} ta maqola)."
-    else:
-        news_msg = "📰 So'nggi yangiliklar:\n" + "\n".join(headlines)
-    send_telegram_message(news_msg)
 
     # Signal tarixga yoziladi - natijasi keyinroq (soatlik status'da) tekshiriladi
     log_new_signal(signal, price_data, interval)
