@@ -47,8 +47,29 @@ def check_env_vars():
 # MA'LUMOT OLISH (TwelveData)
 # ============================================================================
 
+def build_price_data_from_candles(df):
+    """Alohida API so'rovi yubormasdan, allaqachon olingan svechalar ma'lumotidan
+    narx va o'zgarish foizini hisoblab chiqaradi (TwelveData so'rovlar sonini tejash uchun)."""
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else last
+    price = float(last["close"])
+    prev_close = float(prev["close"])
+    change = price - prev_close
+    percent_change = (change / prev_close * 100) if prev_close else 0.0
+    return {
+        "price": price,
+        "change": change,
+        "percent_change": percent_change,
+        "high": float(last["high"]),
+        "low": float(last["low"]),
+        "volume": float(last.get("volume", 0)),
+    }
+
+
 def get_gold_price():
-    """TwelveData orqali XAU/USD narxi va o'zgarish foizini oladi."""
+    """TwelveData orqali XAU/USD narxi va o'zgarish foizini oladi.
+    Eslatma: hozir asosiy oqimda ishlatilmaydi (API so'rovlarini tejash uchun
+    build_price_data_from_candles ishlatiladi), lekin zarur bo'lsa alohida chaqirsa bo'ladi."""
     url = "https://api.twelvedata.com/quote"
     params = {"symbol": "XAU/USD", "apikey": TWELVEDATA_API_KEY}
     resp = requests.get(url, params=params, timeout=15)
@@ -628,9 +649,7 @@ def evaluate_pending_signals():
     return _build_stats(log, checked)
 
 
-def _build_stats(log, checked):
-    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5"}
-    checked = [e for e in checked if e.get("outcome") in valid_outcomes]
+def _stats_for_subset(checked):
     total = len(checked)
     losses = sum(1 for e in checked if e["outcome"] == "loss")
     timeouts = sum(1 for e in checked if e["outcome"] == "timeout")
@@ -639,6 +658,22 @@ def _build_stats(log, checked):
     tp5 = sum(1 for e in checked if e["outcome"] == "tp5")
     wins = tp2 + tp3 + tp5
     win_rate = round(wins / total * 100, 1) if total else None
+    return {
+        "total_checked": total, "wins": wins, "losses": losses, "timeouts": timeouts,
+        "tp2": tp2, "tp3": tp3, "tp5": tp5, "win_rate": win_rate,
+    }
+
+
+def _build_stats(log, checked):
+    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5"}
+    checked = [e for e in checked if e.get("outcome") in valid_outcomes]
+
+    overall = _stats_for_subset(checked)
+
+    by_interval = {}
+    for iv in sorted(set(e.get("interval", "5min") for e in checked)):
+        subset = [e for e in checked if e.get("interval", "5min") == iv]
+        by_interval[iv] = _stats_for_subset(subset)
 
     pending_entries = [e for e in log if not e.get("checked")]
     pending_breakdown = {0: 0, 2: 0, 3: 0}
@@ -646,18 +681,10 @@ def _build_stats(log, checked):
         bt = e.get("best_tp", 0)
         pending_breakdown[bt] = pending_breakdown.get(bt, 0) + 1
 
-    return {
-        "total_checked": total,
-        "wins": wins,
-        "losses": losses,
-        "timeouts": timeouts,
-        "tp2": tp2,
-        "tp3": tp3,
-        "tp5": tp5,
-        "win_rate": win_rate,
-        "pending": len(pending_entries),
-        "pending_breakdown": pending_breakdown,
-    }
+    overall["pending"] = len(pending_entries)
+    overall["pending_breakdown"] = pending_breakdown
+    overall["by_interval"] = by_interval
+    return overall
 
 
 # ============================================================================
@@ -815,11 +842,16 @@ def run_hourly_status(df, price_data, interval="5min"):
             stats = evaluate_pending_signals()
             if stats and stats["total_checked"] > 0:
                 lines.append(
-                    f"\n📈 Signal statistikasi: {stats['total_checked']} ta yopilgan signal — "
+                    f"\n📈 Umumiy statistika: {stats['total_checked']} ta yopilgan signal — "
                     f"aniqlik: {stats['win_rate']}%\n"
                     f"🔥 TP5x: {stats['tp5']} | 🟢 TP3x: {stats['tp3']} | 🟡 TP2x: {stats['tp2']} | "
                     f"❌ SL: {stats['losses']} | ⏱ muddati o'tgan: {stats['timeouts']}"
                 )
+                for iv, s in stats["by_interval"].items():
+                    lines.append(
+                        f"\n▫️ [{iv}]: {s['total_checked']} ta — aniqlik: {s['win_rate']}% "
+                        f"(🔥{s['tp5']} 🟢{s['tp3']} 🟡{s['tp2']} ❌{s['losses']} ⏱{s['timeouts']})"
+                    )
                 if stats["pending"] > 0:
                     pb = stats["pending_breakdown"]
                     parts = []
@@ -849,16 +881,12 @@ def main():
     interval = sys.argv[2] if len(sys.argv) > 2 else "5min"
 
     try:
-        price_data = get_gold_price()
-    except Exception as e:
-        send_telegram_message(f"⚠️ Narx ma'lumotini olishda xatolik: {e}")
-        sys.exit(1)
-
-    try:
         candles_df = get_gold_candles(interval=interval, outputsize=160)
     except Exception as e:
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik ({interval}): {e}")
         sys.exit(1)
+
+    price_data = build_price_data_from_candles(candles_df)
 
     if mode == "signal":
         run_signal_check(candles_df, price_data, interval=interval)
