@@ -629,7 +629,8 @@ def evaluate_pending_signals():
 
 
 def _build_stats(log, checked):
-    checked = [e for e in checked if e.get("outcome") != "legacy_skipped"]
+    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5"}
+    checked = [e for e in checked if e.get("outcome") in valid_outcomes]
     total = len(checked)
     losses = sum(1 for e in checked if e["outcome"] == "loss")
     timeouts = sum(1 for e in checked if e["outcome"] == "timeout")
