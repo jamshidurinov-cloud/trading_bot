@@ -58,13 +58,19 @@ def get_gold_price():
     if "code" in data and data.get("code") != 200:
         raise RuntimeError(f"TwelveData xatosi: {data.get('message')}")
 
+    def to_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return v
+
     return {
-        "price": data.get("close"),
-        "change": data.get("change"),
-        "percent_change": data.get("percent_change"),
-        "high": data.get("high"),
-        "low": data.get("low"),
-        "volume": data.get("volume"),
+        "price": to_float(data.get("close")),
+        "change": to_float(data.get("change")),
+        "percent_change": to_float(data.get("percent_change")),
+        "high": to_float(data.get("high")),
+        "low": to_float(data.get("low")),
+        "volume": to_float(data.get("volume")),
     }
 
 
@@ -503,7 +509,11 @@ def evaluate_pending_signals(current_price):
         if (now - signal_time).total_seconds() < CHECK_AFTER_MINUTES * 60:
             continue  # hali muddati kelmagan
 
-        entry_price = entry["entry_price"]
+        try:
+            entry_price = float(entry["entry_price"])
+            current_price = float(current_price)
+        except (TypeError, ValueError):
+            continue
         pct_change = (current_price - entry_price) / entry_price * 100
 
         if entry["direction"] == "bullish":
