@@ -421,8 +421,19 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
 # (bot signal berishda davom etadi, faqat statistika yig'ilmaydi).
 
 GIST_API_URL = "https://api.github.com/gists"
-CHECK_AFTER_MINUTES = 60   # signal chiqqandan necha daqiqadan keyin natijasini tekshirish
-OUTCOME_THRESHOLD_PCT = 0.05  # neytral/g'olib/mag'lub chegarasi (narx foizda necha % siljishi kerak)
+TIMEOUT_CANDLES = 50  # signal shuncha sveчadan keyin ham SL/TP5 ga tegmasa, "muddati o'tdi" deb yopiladi
+
+
+def interval_to_minutes(interval):
+    """'1min' -> 1, '5min' -> 5 kabi. Noma'lum format kelsa 5 deb hisoblaydi."""
+    try:
+        return int("".join(ch for ch in interval if ch.isdigit()))
+    except (ValueError, TypeError):
+        return 5
+
+
+def timeout_seconds_for(interval):
+    return interval_to_minutes(interval) * TIMEOUT_CANDLES * 60
 
 
 def tracking_enabled():
@@ -466,84 +477,185 @@ def save_signal_log(log):
         print(f"Signal logni saqlashda xatolik: {e}")
 
 
+def compute_sl_level(signal):
+    """Signal strukturasidan SL (stop-loss) darajasini aniqlaydi:
+    bullish uchun eng past nuqta, bearish uchun eng yuqori nuqta."""
+    if signal["type"] in ("smc_bullish", "smc_bearish"):
+        return signal["sweep_level"]
+    if signal["type"] == "spring":
+        return signal["candle_low"]
+    return signal["candle_high"]  # upthrust
+
+
 def log_new_signal(signal, price_data, interval):
-    """Yangi chiqqan signalni tarixga qo'shadi (natijasi keyinroq tekshiriladi)."""
+    """Yangi chiqqan signalni SL/TP darajalari bilan tarixga qo'shadi
+    (natijasi keyinroq svecha-svecha tekshiriladi)."""
     if not tracking_enabled():
         return
     import datetime as dt
 
     direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
+    entry_price = float(price_data["price"])
+    sl_level = float(compute_sl_level(signal))
+    risk = abs(entry_price - sl_level)
+    if risk == 0:
+        risk = entry_price * 0.001  # nolga bo'linishdan himoya
+
+    sign = 1 if direction == "bullish" else -1
     log = load_signal_log()
     log.append({
         "time": dt.datetime.now(dt.timezone.utc).isoformat(),
         "type": signal["type"],
         "interval": interval,
         "direction": direction,
-        "entry_price": price_data["price"],
+        "entry_price": entry_price,
+        "sl_level": sl_level,
+        "tp2_level": entry_price + sign * 2 * risk,
+        "tp3_level": entry_price + sign * 3 * risk,
+        "tp5_level": entry_price + sign * 5 * risk,
+        "best_tp": 0,
         "checked": False,
         "outcome": None,
     })
     save_signal_log(log)
 
 
-def evaluate_pending_signals(current_price):
-    """Muddati o'tgan, hali tekshirilmagan signallarni tekshirib, g'olib/mag'lub/neytral
-    deb belgilaydi. Umumiy statistikani qaytaradi."""
+def evaluate_pending_signals():
+    """Hali yopilmagan signallarni, ularning o'z intervalidagi svechalar bo'yicha
+    (signal chiqqandan keyingi barcha svechalarni ketma-ket ko'rib) tekshiradi:
+    SL yoki TP2x/3x/5x qaysi biri birinchi urilgan bo'lsa, shuni natija qiladi.
+    Bir necha bor chaqirilsa ham xavfsiz — allaqachon tekshirilgan svechalar
+    qayta hisoblanadi, lekin natija o'zgarmaydi (idempotent)."""
     if not tracking_enabled():
         return None
 
     import datetime as dt
 
     log = load_signal_log()
+    pending = [e for e in log if not e.get("checked")]
+    if not pending:
+        checked = [e for e in log if e.get("checked")]
+        return _build_stats(log, checked)
+
+    # Har bir kerakli interval uchun sveчalarni bir marta olamiz (API tejash uchun)
+    intervals_needed = sorted(set(e.get("interval", "5min") for e in pending))
+    candles_cache = {}
+    for iv in intervals_needed:
+        try:
+            candles_cache[iv] = get_gold_candles(interval=iv, outputsize=300)
+        except Exception as e:
+            print(f"Tracking uchun sveчa olishda xatolik ({iv}): {e}")
+
     now = dt.datetime.now(dt.timezone.utc)
     changed = False
 
-    for entry in log:
-        if entry.get("checked"):
+    for entry in pending:
+        iv = entry.get("interval", "5min")
+        df = candles_cache.get(iv)
+        if df is None:
             continue
         try:
             signal_time = dt.datetime.fromisoformat(entry["time"])
         except (ValueError, KeyError):
             continue
 
-        if (now - signal_time).total_seconds() < CHECK_AFTER_MINUTES * 60:
-            continue  # hali muddati kelmagan
-
-        try:
-            entry_price = float(entry["entry_price"])
-            current_price = float(current_price)
-        except (TypeError, ValueError):
+        if "sl_level" not in entry:
+            # Eski formatdagi yozuv (SL/TP maydonlarisiz) - yopib qo'yamiz, statistikaga aralashtirmaymiz
+            entry["checked"] = True
+            entry["outcome"] = "legacy_skipped"
+            changed = True
             continue
-        pct_change = (current_price - entry_price) / entry_price * 100
 
-        if entry["direction"] == "bullish":
-            outcome = "win" if pct_change > OUTCOME_THRESHOLD_PCT else (
-                "loss" if pct_change < -OUTCOME_THRESHOLD_PCT else "neutral")
-        else:
-            outcome = "win" if pct_change < -OUTCOME_THRESHOLD_PCT else (
-                "loss" if pct_change > OUTCOME_THRESHOLD_PCT else "neutral")
+        idx = df.index
+        idx_naive = idx.tz_localize(None) if idx.tz is not None else idx
+        signal_time_naive = signal_time.replace(tzinfo=None)
+        sub = df[idx_naive > signal_time_naive]
+        timeout_sec = timeout_seconds_for(entry.get("interval", "5min"))
+        if sub.empty:
+            # Muddat (interval'ga mos) o'tgan bo'lsa va hali ma'lumot yo'q bo'lsa - "muddati tugadi" deb yopamiz
+            if (now - signal_time).total_seconds() > timeout_sec:
+                entry["checked"] = True
+                entry["outcome"] = f"tp{entry['best_tp']}" if entry["best_tp"] else "timeout"
+                changed = True
+            continue
 
-        entry["checked"] = True
-        entry["outcome"] = outcome
-        changed = True
+        direction = entry["direction"]
+        sl = entry["sl_level"]
+        tp_levels = {2: entry["tp2_level"], 3: entry["tp3_level"], 5: entry["tp5_level"]}
+        best_tp_before = entry.get("best_tp", 0)
+        best_tp = best_tp_before
+        hit_sl = False
+
+        for _, candle in sub.iterrows():
+            lo, hi = candle["low"], candle["high"]
+
+            sl_touched = (lo <= sl) if direction == "bullish" else (hi >= sl)
+            if sl_touched:
+                hit_sl = True
+                break
+
+            for level_num in (2, 3, 5):
+                if best_tp >= level_num:
+                    continue
+                level_price = tp_levels[level_num]
+                tp_touched = (hi >= level_price) if direction == "bullish" else (lo <= level_price)
+                if tp_touched:
+                    best_tp = level_num
+
+            if best_tp == 5:
+                break
+
+        entry["best_tp"] = best_tp
+        if hit_sl:
+            entry["checked"] = True
+            entry["outcome"] = f"tp{best_tp}" if best_tp else "loss"
+            changed = True
+        elif best_tp == 5:
+            entry["checked"] = True
+            entry["outcome"] = "tp5"
+            changed = True
+        elif (now - signal_time).total_seconds() > timeout_sec:
+            entry["checked"] = True
+            entry["outcome"] = f"tp{best_tp}" if best_tp else "timeout"
+            changed = True
+        elif best_tp != best_tp_before:
+            changed = True  # progress o'zgardi, saqlaymiz
 
     if changed:
         save_signal_log(log)
 
     checked = [e for e in log if e.get("checked")]
-    wins = sum(1 for e in checked if e["outcome"] == "win")
-    losses = sum(1 for e in checked if e["outcome"] == "loss")
-    neutral = sum(1 for e in checked if e["outcome"] == "neutral")
+    return _build_stats(log, checked)
+
+
+def _build_stats(log, checked):
+    checked = [e for e in checked if e.get("outcome") != "legacy_skipped"]
     total = len(checked)
+    losses = sum(1 for e in checked if e["outcome"] == "loss")
+    timeouts = sum(1 for e in checked if e["outcome"] == "timeout")
+    tp2 = sum(1 for e in checked if e["outcome"] == "tp2")
+    tp3 = sum(1 for e in checked if e["outcome"] == "tp3")
+    tp5 = sum(1 for e in checked if e["outcome"] == "tp5")
+    wins = tp2 + tp3 + tp5
     win_rate = round(wins / total * 100, 1) if total else None
+
+    pending_entries = [e for e in log if not e.get("checked")]
+    pending_breakdown = {0: 0, 2: 0, 3: 0}
+    for e in pending_entries:
+        bt = e.get("best_tp", 0)
+        pending_breakdown[bt] = pending_breakdown.get(bt, 0) + 1
 
     return {
         "total_checked": total,
         "wins": wins,
         "losses": losses,
-        "neutral": neutral,
+        "timeouts": timeouts,
+        "tp2": tp2,
+        "tp3": tp3,
+        "tp5": tp5,
         "win_rate": win_rate,
-        "pending": len(log) - total,
+        "pending": len(pending_entries),
+        "pending_breakdown": pending_breakdown,
     }
 
 
@@ -699,17 +811,26 @@ def run_hourly_status(df, price_data, interval="5min"):
 
     if tracking_enabled():
         try:
-            stats = evaluate_pending_signals(price_data["price"])
+            stats = evaluate_pending_signals()
             if stats and stats["total_checked"] > 0:
                 lines.append(
-                    f"\n📈 Signal statistikasi: {stats['total_checked']} ta signal tekshirildi — "
-                    f"✅ {stats['wins']} g'olib, ❌ {stats['losses']} mag'lub, "
-                    f"➖ {stats['neutral']} neytral (aniqlik: {stats['win_rate']}%)"
+                    f"\n📈 Signal statistikasi: {stats['total_checked']} ta yopilgan signal — "
+                    f"aniqlik: {stats['win_rate']}%\n"
+                    f"🔥 TP5x: {stats['tp5']} | 🟢 TP3x: {stats['tp3']} | 🟡 TP2x: {stats['tp2']} | "
+                    f"❌ SL: {stats['losses']} | ⏱ muddati o'tgan: {stats['timeouts']}"
                 )
                 if stats["pending"] > 0:
-                    lines.append(f"⏳ Hali natijasi kutilayotgan signallar: {stats['pending']}")
+                    pb = stats["pending_breakdown"]
+                    parts = []
+                    if pb.get(3, 0) > 0:
+                        parts.append(f"🟢 {pb[3]} ta 3x da")
+                    if pb.get(2, 0) > 0:
+                        parts.append(f"🟡 {pb[2]} ta 2x da")
+                    if pb.get(0, 0) > 0:
+                        parts.append(f"⏳ {pb[0]} ta hali TP urmagan")
+                    lines.append(f"\n⏳ Kuzatilayotgan signallar ({stats['pending']}): " + ", ".join(parts))
             elif stats:
-                lines.append(f"\n📈 Signal statistikasi: hali yetarli tekshirilgan signal yo'q (kutilmoqda: {stats['pending']}).")
+                lines.append(f"\n📈 Signal statistikasi: hali yopilgan signal yo'q (kuzatilmoqda: {stats['pending']}).")
         except Exception as e:
             lines.append(f"\n⚠️ Signal statistikasini olishda xatolik: {e}")
 
