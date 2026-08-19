@@ -664,7 +664,12 @@ def _stats_for_subset(checked):
     }
 
 
+ROLLING_WINDOW_HOURS = 4  # "so'nggi N soatlik" statistika oynasi
+
+
 def _build_stats(log, checked):
+    import datetime as dt
+
     valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5"}
     checked = [e for e in checked if e.get("outcome") in valid_outcomes]
 
@@ -675,6 +680,19 @@ def _build_stats(log, checked):
         subset = [e for e in checked if e.get("interval", "5min") == iv]
         by_interval[iv] = _stats_for_subset(subset)
 
+    # So'nggi ROLLING_WINDOW_HOURS soat ichida YOPILGAN signallar (umumiy statistika
+    # o'chirilmaydi, bu faqat qo'shimcha, "hozir qanday ketyapti" ko'rsatkichi)
+    now = dt.datetime.now(dt.timezone.utc)
+    recent = []
+    for e in checked:
+        try:
+            t = dt.datetime.fromisoformat(e["time"])
+        except (ValueError, KeyError):
+            continue
+        if (now - t).total_seconds() <= ROLLING_WINDOW_HOURS * 3600:
+            recent.append(e)
+    recent_stats = _stats_for_subset(recent)
+
     pending_entries = [e for e in log if not e.get("checked")]
     pending_breakdown = {0: 0, 2: 0, 3: 0}
     for e in pending_entries:
@@ -684,6 +702,7 @@ def _build_stats(log, checked):
     overall["pending"] = len(pending_entries)
     overall["pending_breakdown"] = pending_breakdown
     overall["by_interval"] = by_interval
+    overall["recent"] = recent_stats
     return overall
 
 
@@ -852,6 +871,15 @@ def run_hourly_status(df, price_data, interval="5min"):
                         f"\n▫️ [{iv}]: {s['total_checked']} ta — aniqlik: {s['win_rate']}% "
                         f"(🔥{s['tp5']} 🟢{s['tp3']} 🟡{s['tp2']} ❌{s['losses']} ⏱{s['timeouts']})"
                     )
+                r = stats["recent"]
+                if r["total_checked"] > 0:
+                    lines.append(
+                        f"\n🕓 So'nggi {ROLLING_WINDOW_HOURS} soat: {r['total_checked']} ta — "
+                        f"aniqlik: {r['win_rate']}% "
+                        f"(🔥{r['tp5']} 🟢{r['tp3']} 🟡{r['tp2']} ❌{r['losses']} ⏱{r['timeouts']})"
+                    )
+                else:
+                    lines.append(f"\n🕓 So'nggi {ROLLING_WINDOW_HOURS} soat: yopilgan signal yo'q.")
                 if stats["pending"] > 0:
                     pb = stats["pending_breakdown"]
                     parts = []
