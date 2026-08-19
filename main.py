@@ -250,10 +250,17 @@ def find_swing_points(highs, lows, window=3, exclude_last=True):
     return swing_high_idx, swing_low_idx
 
 
-def detect_smc_composite(df, swing_window=3, lookback=40):
+def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15):
     """ENG KUCHLI SMC/ICT signal: Liquidity Sweep + FVG + BOS/CHoCH ketma-ketligi.
     Faqat BOS/CHoCH aynan JORIY (oxirgi) svechada tasdiqlansa signal beradi —
-    shu bilan har bir voqea faqat bir marta xabar qilinadi."""
+    shu bilan har bir voqea faqat bir marta xabar qilinadi.
+
+    Soxta (ahamiyatsiz) signallarni kamaytirish uchun ikkita filtr qo'shilgan:
+    - min_fvg_mult: FVG (bo'shliq) kamida o'rtacha svecha kattaligining shuncha
+      qismi bo'lishi kerak (juda mayda, ahamiyatsiz "bo'shliq"larni rad etadi)
+    - min_sweep_mult: sweep chuqurligi (narx swing darajasidan qanchalik pastga/
+      yuqoriga chiqqani) kamida shuncha bo'lishi kerak (arzimas sweep'larni rad etadi)
+    """
     if len(df) < lookback:
         return None
 
@@ -264,6 +271,10 @@ def detect_smc_composite(df, swing_window=3, lookback=40):
     times = sub.index
     n = len(sub)
     cur = n - 1
+
+    avg_candle_range = (sub["high"] - sub["low"]).mean()
+    min_fvg_size = avg_candle_range * min_fvg_mult
+    min_sweep_depth = avg_candle_range * min_sweep_mult
 
     swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=swing_window, exclude_last=True)
     if not swing_high_idx or not swing_low_idx:
@@ -278,18 +289,19 @@ def detect_smc_composite(df, swing_window=3, lookback=40):
         last_swing_high = highs[ph[-1]]
         is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
         if is_fresh_break:
-            # FVG qidiramiz (joriy svechadan oldin): lows[j] > highs[j-2]
+            # FVG qidiramiz (joriy svechadan oldin): lows[j] - highs[j-2] >= min_fvg_size
             fvg_idx = None
             for j in range(swing_window, cur):
-                if j >= 2 and lows[j] > highs[j - 2]:
+                if j >= 2 and (lows[j] - highs[j - 2]) >= min_fvg_size:
                     fvg_idx = j
             if fvg_idx is not None:
-                # Sweep qidiramiz (FVG'dan oldin): past nuqta swing low'dan pastga tushib, qaytgan
+                # Sweep qidiramiz (FVG'dan oldin): past nuqta swing low'dan yetarlicha
+                # pastga tushib (min_sweep_depth), keyin qaytgan
                 for k in range(swing_window, fvg_idx):
                     pl = prior_lows_before(k)
                     if pl:
                         sl = lows[pl[-1]]
-                        if lows[k] < sl and closes[k] > sl:
+                        if (sl - lows[k]) >= min_sweep_depth and closes[k] > sl:
                             return {
                                 "type": "smc_bullish",
                                 "sweep_time": str(times[k]),
@@ -307,14 +319,14 @@ def detect_smc_composite(df, swing_window=3, lookback=40):
         if is_fresh_break:
             fvg_idx = None
             for j in range(swing_window, cur):
-                if j >= 2 and highs[j] < lows[j - 2]:
+                if j >= 2 and (lows[j - 2] - highs[j]) >= min_fvg_size:
                     fvg_idx = j
             if fvg_idx is not None:
                 for k in range(swing_window, fvg_idx):
                     ph2 = prior_highs_before(k)
                     if ph2:
                         sh = highs[ph2[-1]]
-                        if highs[k] > sh and closes[k] < sh:
+                        if (highs[k] - sh) >= min_sweep_depth and closes[k] < sh:
                             return {
                                 "type": "smc_bearish",
                                 "sweep_time": str(times[k]),
