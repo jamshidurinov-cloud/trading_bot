@@ -29,11 +29,7 @@ REQUIRED_VARS = {
     "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
 }
 
-RANGE_LOOKBACK = 20      # diapazonni aniqlash uchun necha sveчadan foydalanish
-EFFORT_MULTIPLIER = 1.5  # svecha "kuchli harakat" deb hisoblanishi uchun o'rtacha svecha
-                         # kattaligidan necha baravar yuqori bo'lishi kerak
-                         # (XAUUSD'da haqiqiy savdo hajmi mavjud emasligi sababli,
-                         # hajm o'rniga svecha kattaligi - high-low farqi - ishlatiladi)
+RANGE_LOOKBACK = 20      # diapazonni aniqlash uchun necha sveчadan foydalanish (soatlik holat uchun)
 
 
 def check_env_vars():
@@ -171,66 +167,125 @@ def get_forex_calendar_events(hours_ahead=24):
 # QOIDA DVIGATELI - Wyckoff Spring / Upthrust / Range holati
 # ============================================================================
 
-def detect_spring(df, lookback=RANGE_LOOKBACK, effort_mult=EFFORT_MULTIPLIER):
-    """SPRING: narx diapazon pastki chegarasidan soxta chiqib, qaytib kiradi,
-    va bu KUCHLI HARAKAT (o'rtachadan kattaroq svecha) bilan tasdiqlanadi.
-    (XAUUSD'da haqiqiy hajm yo'qligi sababli, svecha kattaligi - high-low - ishlatiladi)."""
-    if len(df) < lookback + 1:
+RANGE_TOLERANCE_PCT = 0.3   # "teng" cho'qqi/tub deb hisoblash uchun ruxsat etilgan farq (%)
+CONFIRM_CANDLES = 2         # range'ga qaytgandan keyin tasdiqlash uchun kutiladigan sveчalar soni
+
+
+def cluster_equal_levels(points, tolerance_pct, min_span=10):
+    """points: [(indeks, narx), ...]. Bir-biriga tolerance_pct ichida yaqin narxlarni
+    guruhlaydi ("teng cho'qqi/tub"). Faqat vaqt bo'yicha yetarlicha uzoq tarqalgan
+    (min_span sveчadan ko'p) guruhlarni qaytaradi — bu tasodifiy, yaqin-orada
+    joylashgan shovqinni chinakam qayta-qayta sinalgan darajadan ajratadi."""
+    points = sorted(points, key=lambda p: p[1])
+    clusters = []
+    used = [False] * len(points)
+
+    for i in range(len(points)):
+        if used[i]:
+            continue
+        group = [points[i]]
+        used[i] = True
+        for j in range(i + 1, len(points)):
+            if used[j]:
+                continue
+            avg_so_far = sum(v for _, v in group) / len(group)
+            if avg_so_far == 0:
+                continue
+            if abs(points[j][1] - avg_so_far) / avg_so_far * 100 <= tolerance_pct:
+                group.append(points[j])
+                used[j] = True
+        indices = [idx for idx, _ in group]
+        if len(group) >= 2 and (max(indices) - min(indices)) >= min_span:
+            level = sum(v for _, v in group) / len(group)
+            clusters.append({"level": level, "indices": indices})
+    return clusters
+
+
+def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT):
+    """Qattiq sveчa soniga bog'lanmasdan, 'teng cho'qqilar' va 'teng tublar' asosida
+    range chegaralarini topadi — range necha sveчa davom etgani muhim emas."""
+    if len(df) < lookback:
         return None
 
-    window = df.iloc[-(lookback + 1):-1]
-    current = df.iloc[-1]
+    sub = df.iloc[-lookback:]
+    highs = sub["high"].values
+    lows = sub["low"].values
 
-    range_low = window["low"].min()
-    range_high = window["high"].max()
-    avg_candle_range = (window["high"] - window["low"]).mean()
-    current_candle_range = current["high"] - current["low"]
-
-    is_false_breakdown = current["low"] < range_low and current["close"] > range_low
-    is_effort_confirmed = avg_candle_range > 0 and current_candle_range > avg_candle_range * effort_mult
-
-    if is_false_breakdown and is_effort_confirmed:
-        return {
-            "type": "spring",
-            "range_low": range_low,
-            "range_high": range_high,
-            "candle_low": current["low"],
-            "candle_close": current["close"],
-            "candle_range": current_candle_range,
-            "avg_candle_range": avg_candle_range,
-            "time": str(current.name),
-        }
-    return None
-
-
-def detect_upthrust(df, lookback=RANGE_LOOKBACK, effort_mult=EFFORT_MULTIPLIER):
-    """UPTHRUST: narx diapazon yuqori chegarasidan soxta chiqib, qaytib kiradi,
-    va bu KUCHLI HARAKAT (o'rtachadan kattaroq svecha) bilan tasdiqlanadi."""
-    if len(df) < lookback + 1:
+    swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=swing_window, exclude_last=True)
+    if not swing_high_idx or not swing_low_idx:
         return None
 
-    window = df.iloc[-(lookback + 1):-1]
-    current = df.iloc[-1]
+    high_clusters = cluster_equal_levels([(i, highs[i]) for i in swing_high_idx], tolerance_pct)
+    low_clusters = cluster_equal_levels([(i, lows[i]) for i in swing_low_idx], tolerance_pct)
+    if not high_clusters or not low_clusters:
+        return None
 
-    range_low = window["low"].min()
-    range_high = window["high"].max()
-    avg_candle_range = (window["high"] - window["low"]).mean()
-    current_candle_range = current["high"] - current["low"]
+    # Eng so'nggi (joriy vaqtga eng yaqin) cluster'larni tanlaymiz - hozirgi range shu
+    best_high = max(high_clusters, key=lambda c: max(c["indices"]))
+    best_low = max(low_clusters, key=lambda c: max(c["indices"]))
 
-    is_false_breakout = current["high"] > range_high and current["close"] < range_high
-    is_effort_confirmed = avg_candle_range > 0 and current_candle_range > avg_candle_range * effort_mult
+    range_high = best_high["level"]
+    range_low = best_low["level"]
+    if range_high <= range_low:
+        return None
 
-    if is_false_breakout and is_effort_confirmed:
-        return {
-            "type": "upthrust",
-            "range_low": range_low,
-            "range_high": range_high,
-            "candle_high": current["high"],
-            "candle_close": current["close"],
-            "candle_range": current_candle_range,
-            "avg_candle_range": avg_candle_range,
-            "time": str(current.name),
-        }
+    return {"range_high": range_high, "range_low": range_low}
+
+
+def detect_dynamic_spring_upthrust(df, swing_window=6, lookback=144,
+                                     tolerance_pct=RANGE_TOLERANCE_PCT, confirm_candles=CONFIRM_CANDLES):
+    """Moslashuvchan range'ga sweep qilib qaytgandan keyin, CONFIRM_CANDLES ta sveчa
+    davomida narx shu yo'nalishda davom etsa (siz aytgan 'keyingi harakatga qarab
+    tasdiqlash' mantig'i), signal beradi. Har voqea faqat bir marta xabar qilinadi."""
+    range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
+    if range_info is None:
+        return None
+
+    sub = df.iloc[-lookback:]
+    highs = sub["high"].values
+    lows = sub["low"].values
+    closes = sub["close"].values
+    times = sub.index
+    n = len(sub)
+
+    range_high = range_info["range_high"]
+    range_low = range_info["range_low"]
+
+    event_idx = n - 1 - confirm_candles
+    if event_idx < swing_window:
+        return None
+
+    # SPRING: event_idx svechada past nuqta range_low'dan pastga tushib, yopilish qaytgan,
+    # so'ngra keyingi confirm_candles ta sveчa davomida narx pasaymagan (davom etgan)
+    if lows[event_idx] < range_low and closes[event_idx] > range_low:
+        entry_close = closes[event_idx]
+        confirmed = all(closes[event_idx + k] >= entry_close for k in range(1, confirm_candles + 1))
+        if confirmed and closes[-1] > entry_close:
+            return {
+                "type": "dynamic_spring",
+                "range_high": range_high,
+                "range_low": range_low,
+                "event_time": str(times[event_idx]),
+                "event_low": lows[event_idx],
+                "event_close": entry_close,
+                "current_close": closes[-1],
+            }
+
+    # UPTHRUST: teskarisi
+    if highs[event_idx] > range_high and closes[event_idx] < range_high:
+        entry_close = closes[event_idx]
+        confirmed = all(closes[event_idx + k] <= entry_close for k in range(1, confirm_candles + 1))
+        if confirmed and closes[-1] < entry_close:
+            return {
+                "type": "dynamic_upthrust",
+                "range_high": range_high,
+                "range_low": range_low,
+                "event_time": str(times[event_idx]),
+                "event_high": highs[event_idx],
+                "event_close": entry_close,
+                "current_close": closes[-1],
+            }
+
     return None
 
 
@@ -515,9 +570,9 @@ def compute_sl_level(signal):
     bullish uchun eng past nuqta, bearish uchun eng yuqori nuqta."""
     if signal["type"] in ("smc_bullish", "smc_bearish"):
         return signal["sweep_level"]
-    if signal["type"] == "spring":
-        return signal["candle_low"]
-    return signal["candle_high"]  # upthrust
+    if signal["type"] == "dynamic_spring":
+        return signal["event_low"]
+    return signal["event_high"]  # dynamic_upthrust
 
 
 def log_new_signal(signal, price_data, interval):
@@ -527,7 +582,7 @@ def log_new_signal(signal, price_data, interval):
         return
     import datetime as dt
 
-    direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
+    direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring") else "bearish"
     entry_price = float(price_data["price"])
     sl_level = float(compute_sl_level(signal))
     risk = abs(entry_price - sl_level)
@@ -752,9 +807,8 @@ def send_telegram_document(file_path, caption=""):
 def run_signal_check(df, price_data, interval="5min"):
     # Eng kuchli signal birinchi tekshiriladi — agar u chiqsa, boshqalar tekshirilmaydi
     smc = detect_smc_composite(df, lookback=144)
-    spring = None if smc else detect_spring(df)
-    upthrust = None if (smc or spring) else detect_upthrust(df)
-    signal = smc or spring or upthrust
+    dynamic = None if smc else detect_dynamic_spring_upthrust(df, lookback=144)
+    signal = smc or dynamic
 
     if not signal:
         print(f"[{interval}] Signal yo'q — jim chiqamiz.")
@@ -764,7 +818,7 @@ def run_signal_check(df, price_data, interval="5min"):
 
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
-    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "spring") else "bearish"
+    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring") else "bearish"
     trend_warning = ""
     if bias != "neutral" and bias != signal_direction:
         bias_uz = "YUQORIGA (bullish)" if bias == "bullish" else "PASTGA (bearish)"
@@ -790,21 +844,21 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
             f"BOS darajasi: {signal['bos_level']:.2f} (yopilish: {signal['current_close']:.2f})"
         )
-    elif signal["type"] == "spring":
-        emoji, label = "🟢", f"{tf_tag} SPRING (pastga soxta sinish -> mumkin bo'lgan ko'tarilish)"
+    elif signal["type"] == "dynamic_spring":
+        emoji, label = "🟢", f"{tf_tag} SPRING (range'ga qaytish + tasdiqlangan davomiylik)"
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
-            f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
+            f"Range: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+            f"Voqea narxi: {signal['event_close']:.2f} → hozir: {signal['current_close']:.2f}"
         )
     else:
-        emoji, label = "🔴", f"{tf_tag} UPTHRUST (yuqoriga soxta sinish -> mumkin bo'lgan tushish)"
+        emoji, label = "🔴", f"{tf_tag} UPTHRUST (range'ga qaytish + tasdiqlangan davomiylik)"
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Diapazon: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
-            f"Svecha kattaligi: {signal['candle_range']:.2f} (o'rtacha: {signal['avg_candle_range']:.2f})"
+            f"Range: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+            f"Voqea narxi: {signal['event_close']:.2f} → hozir: {signal['current_close']:.2f}"
         )
 
     caption += trend_warning
