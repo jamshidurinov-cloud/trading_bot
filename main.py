@@ -436,6 +436,9 @@ def save_signal_log(log):
         print(f"Signal logni saqlashda xatolik: {e}")
 
 
+SL_BUFFER = 0.03  # sweep darajasidan qo'shimcha zaxira (USD) - tasodifiy tebranishdan himoya
+
+
 def compute_sl_level(signal):
     """Signal strukturasidan SL (stop-loss) darajasini aniqlaydi:
     bullish uchun eng past nuqta, bearish uchun eng yuqori nuqta."""
@@ -446,8 +449,8 @@ def compute_sl_level(signal):
     if signal["type"] == "dynamic_upthrust":
         return signal["event_high"]
     if signal["type"] == "jackpot_spring":
-        return signal["test_low"]
-    return signal["test_high"]  # jackpot_upthrust
+        return signal["event_low"] - SL_BUFFER
+    return signal["event_high"] + SL_BUFFER  # jackpot_upthrust
 
 
 def log_new_signal(signal, price_data, interval):
@@ -687,7 +690,17 @@ def run_signal_check(df, price_data, interval="5min"):
     signal = jackpot or smc or dynamic
 
     if not signal:
-        print(f"[{interval}] Signal yo'q — jim chiqamiz.")
+        # DEBUG: range topilgan-topilmaganini va joriy narxni logga yozib chiqaramiz -
+        # bu signal nega chiqmaganini keyinroq aniq tahlil qilish uchun kerak
+        range_info = detect_dynamic_range(df, lookback=144)
+        last_close = df["close"].iloc[-1]
+        if range_info:
+            print(f"[{interval}] Signal yo'q. Range topildi: "
+                  f"{range_info['range_low']:.2f} - {range_info['range_high']:.2f}, "
+                  f"joriy narx: {last_close:.2f}")
+        else:
+            print(f"[{interval}] Signal yo'q. Range topilmadi (teng cho'qqi/tub yo'q), "
+                  f"joriy narx: {last_close:.2f}")
         return
 
     chart_path = make_chart_image(df.tail(100), interval=interval)
