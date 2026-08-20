@@ -167,142 +167,13 @@ def get_forex_calendar_events(hours_ahead=24):
 # QOIDA DVIGATELI - Wyckoff Spring / Upthrust / Range holati
 # ============================================================================
 
-RANGE_TOLERANCE_PCT = 0.3   # "teng" cho'qqi/tub deb hisoblash uchun ruxsat etilgan farq (%)
-CONFIRM_CANDLES = 2         # range'ga qaytgandan keyin tasdiqlash uchun kutiladigan sveчalar soni
-
-
-def cluster_equal_levels(points, tolerance_pct, min_span=10):
-    """points: [(indeks, narx), ...]. Bir-biriga tolerance_pct ichida yaqin narxlarni
-    guruhlaydi ("teng cho'qqi/tub"). Faqat vaqt bo'yicha yetarlicha uzoq tarqalgan
-    (min_span sveчadan ko'p) guruhlarni qaytaradi — bu tasodifiy, yaqin-orada
-    joylashgan shovqinni chinakam qayta-qayta sinalgan darajadan ajratadi."""
-    points = sorted(points, key=lambda p: p[1])
-    clusters = []
-    used = [False] * len(points)
-
-    for i in range(len(points)):
-        if used[i]:
-            continue
-        group = [points[i]]
-        used[i] = True
-        for j in range(i + 1, len(points)):
-            if used[j]:
-                continue
-            avg_so_far = sum(v for _, v in group) / len(group)
-            if avg_so_far == 0:
-                continue
-            if abs(points[j][1] - avg_so_far) / avg_so_far * 100 <= tolerance_pct:
-                group.append(points[j])
-                used[j] = True
-        indices = [idx for idx, _ in group]
-        if len(group) >= 2 and (max(indices) - min(indices)) >= min_span:
-            level = sum(v for _, v in group) / len(group)
-            clusters.append({"level": level, "indices": indices})
-    return clusters
-
-
-def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT):
-    """Qattiq sveчa soniga bog'lanmasdan, 'teng cho'qqilar' va 'teng tublar' asosida
-    range chegaralarini topadi — range necha sveчa davom etgani muhim emas."""
-    if len(df) < lookback:
-        return None
-
-    sub = df.iloc[-lookback:]
-    highs = sub["high"].values
-    lows = sub["low"].values
-
-    swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=swing_window, exclude_last=True)
-    if not swing_high_idx or not swing_low_idx:
-        return None
-
-    high_clusters = cluster_equal_levels([(i, highs[i]) for i in swing_high_idx], tolerance_pct)
-    low_clusters = cluster_equal_levels([(i, lows[i]) for i in swing_low_idx], tolerance_pct)
-    if not high_clusters or not low_clusters:
-        return None
-
-    # Eng so'nggi (joriy vaqtga eng yaqin) cluster'larni tanlaymiz - hozirgi range shu
-    best_high = max(high_clusters, key=lambda c: max(c["indices"]))
-    best_low = max(low_clusters, key=lambda c: max(c["indices"]))
-
-    range_high = best_high["level"]
-    range_low = best_low["level"]
-    if range_high <= range_low:
-        return None
-
-    return {"range_high": range_high, "range_low": range_low}
-
-
-def detect_dynamic_spring_upthrust(df, swing_window=6, lookback=144,
-                                     tolerance_pct=RANGE_TOLERANCE_PCT, confirm_candles=CONFIRM_CANDLES):
-    """Moslashuvchan range'ga sweep qilib qaytgandan keyin, CONFIRM_CANDLES ta sveчa
-    davomida narx shu yo'nalishda davom etsa (siz aytgan 'keyingi harakatga qarab
-    tasdiqlash' mantig'i), signal beradi. Har voqea faqat bir marta xabar qilinadi."""
-    range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
-    if range_info is None:
-        return None
-
-    sub = df.iloc[-lookback:]
-    highs = sub["high"].values
-    lows = sub["low"].values
-    closes = sub["close"].values
-    times = sub.index
-    n = len(sub)
-
-    range_high = range_info["range_high"]
-    range_low = range_info["range_low"]
-
-    event_idx = n - 1 - confirm_candles
-    if event_idx < swing_window:
-        return None
-
-    # SPRING: event_idx svechada past nuqta range_low'dan pastga tushib, yopilish qaytgan,
-    # so'ngra keyingi confirm_candles ta sveчa davomida narx pasaymagan (davom etgan)
-    if lows[event_idx] < range_low and closes[event_idx] > range_low:
-        entry_close = closes[event_idx]
-        confirmed = all(closes[event_idx + k] >= entry_close for k in range(1, confirm_candles + 1))
-        if confirmed and closes[-1] > entry_close:
-            return {
-                "type": "dynamic_spring",
-                "range_high": range_high,
-                "range_low": range_low,
-                "event_time": str(times[event_idx]),
-                "event_low": lows[event_idx],
-                "event_close": entry_close,
-                "current_close": closes[-1],
-            }
-
-    # UPTHRUST: teskarisi
-    if highs[event_idx] > range_high and closes[event_idx] < range_high:
-        entry_close = closes[event_idx]
-        confirmed = all(closes[event_idx + k] <= entry_close for k in range(1, confirm_candles + 1))
-        if confirmed and closes[-1] < entry_close:
-            return {
-                "type": "dynamic_upthrust",
-                "range_high": range_high,
-                "range_low": range_low,
-                "event_time": str(times[event_idx]),
-                "event_high": highs[event_idx],
-                "event_close": entry_close,
-                "current_close": closes[-1],
-            }
-
-    return None
-
-
-def find_swing_points(highs, lows, window=3, exclude_last=True):
-    """Har bir nuqta atrofida (window ta oldin, window ta keyin) eng yuqori/past
-    bo'lsa, uni tasdiqlangan swing high/low deb belgilaydi."""
-    n = len(highs)
-    swing_high_idx, swing_low_idx = [], []
-    end = n - 1 if exclude_last else n
-    for i in range(window, end):
-        lo = max(0, i - window)
-        hi = min(n, i + window + 1)
-        if highs[i] == highs[lo:hi].max():
-            swing_high_idx.append(i)
-        if lows[i] == lows[lo:hi].min():
-            swing_low_idx.append(i)
-    return swing_high_idx, swing_low_idx
+# JACKPOT, moslashuvchan range va Spring/Upthrust mantiqi alohida faylda
+# (jackpot_signal.py) - shu yerdan import qilinadi:
+from jackpot_signal import (
+    RANGE_TOLERANCE_PCT, CONFIRM_CANDLES, TEST_TOLERANCE_PCT, TEST_SEARCH_WINDOW,
+    find_swing_points, cluster_equal_levels, detect_dynamic_range,
+    detect_dynamic_spring_upthrust, detect_jackpot_signal,
+)
 
 
 def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15):
@@ -572,7 +443,11 @@ def compute_sl_level(signal):
         return signal["sweep_level"]
     if signal["type"] == "dynamic_spring":
         return signal["event_low"]
-    return signal["event_high"]  # dynamic_upthrust
+    if signal["type"] == "dynamic_upthrust":
+        return signal["event_high"]
+    if signal["type"] == "jackpot_spring":
+        return signal["test_low"]
+    return signal["test_high"]  # jackpot_upthrust
 
 
 def log_new_signal(signal, price_data, interval):
@@ -582,7 +457,7 @@ def log_new_signal(signal, price_data, interval):
         return
     import datetime as dt
 
-    direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring") else "bearish"
+    direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring", "jackpot_spring") else "bearish"
     entry_price = float(price_data["price"])
     sl_level = float(compute_sl_level(signal))
     risk = abs(entry_price - sl_level)
@@ -806,9 +681,10 @@ def send_telegram_document(file_path, caption=""):
 
 def run_signal_check(df, price_data, interval="5min"):
     # Eng kuchli signal birinchi tekshiriladi — agar u chiqsa, boshqalar tekshirilmaydi
-    smc = detect_smc_composite(df, lookback=144)
-    dynamic = None if smc else detect_dynamic_spring_upthrust(df, lookback=144)
-    signal = smc or dynamic
+    jackpot = detect_jackpot_signal(df, lookback=144)
+    smc = None if jackpot else detect_smc_composite(df, lookback=144)
+    dynamic = None if (jackpot or smc) else detect_dynamic_spring_upthrust(df, lookback=144)
+    signal = jackpot or smc or dynamic
 
     if not signal:
         print(f"[{interval}] Signal yo'q — jim chiqamiz.")
@@ -818,7 +694,7 @@ def run_signal_check(df, price_data, interval="5min"):
 
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
-    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring") else "bearish"
+    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring", "jackpot_spring") else "bearish"
     trend_warning = ""
     if bias != "neutral" and bias != signal_direction:
         bias_uz = "YUQORIGA (bullish)" if bias == "bullish" else "PASTGA (bearish)"
@@ -828,7 +704,25 @@ def run_signal_check(df, price_data, interval="5min"):
             f"UMUMIY TREND'GA QARSHI bo'lishi mumkin, ehtiyot bo'ling."
         )
 
-    if signal["type"] == "smc_bullish":
+    if signal["type"] == "jackpot_spring":
+        emoji, label = "🎰🟢", f"{tf_tag} JACKPOT: Spring + Test (BULLISH)"
+        caption = (
+            f"{emoji} {label}\n"
+            f"Narx: {price_data['price']} USD\n"
+            f"Range: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+            f"Sweep: {signal['event_low']:.2f}  |  Test: {signal['test_low']:.2f}\n"
+            f"Hozir: {signal['current_close']:.2f}"
+        )
+    elif signal["type"] == "jackpot_upthrust":
+        emoji, label = "🎰🔴", f"{tf_tag} JACKPOT: Upthrust + Test (BEARISH)"
+        caption = (
+            f"{emoji} {label}\n"
+            f"Narx: {price_data['price']} USD\n"
+            f"Range: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
+            f"Sweep: {signal['event_high']:.2f}  |  Test: {signal['test_high']:.2f}\n"
+            f"Hozir: {signal['current_close']:.2f}"
+        )
+    elif signal["type"] == "smc_bullish":
         emoji, label = "🔥🟢", f"{tf_tag} KUCHLI SIGNAL: Liquidity Sweep + FVG + BOS (BULLISH)"
         caption = (
             f"{emoji} {label}\n"
