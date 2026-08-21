@@ -709,7 +709,7 @@ def run_signal_check(df, price_data, interval="5min"):
                   f"joriy narx: {last_close:.2f}")
         return
 
-    chart_path = make_chart_image(df.tail(100), interval=interval)
+    chart_path = make_chart_image(df.tail(150), interval=interval)
 
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
