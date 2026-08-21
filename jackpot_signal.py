@@ -87,6 +87,21 @@ def cluster_equal_levels(points, tolerance_pct, min_span=10, mode="high"):
     return clusters
 
 
+def is_level_respected(highs, lows, lo_idx, hi_idx, level, tolerance_pct, mode):
+    """Ikki nuqta orasidagi BARCHA sveчalarni tekshiradi — agar ulardan birortasi
+    ham chegarani (tolerantlikdan tashqari) buzgan bo'lsa, bu range 'haqiqiy emas'
+    deb hisoblanadi (ya'ni ikki nuqta orasida narx allaqachon chegaradan chiqib
+    ketgan bo'lsa, ular 'range chegarasi' bo'la olmaydi)."""
+    if level == 0:
+        return False
+    segment = highs[lo_idx:hi_idx + 1] if mode == "high" else lows[lo_idx:hi_idx + 1]
+    if mode == "high":
+        extreme = segment.max()
+        return (extreme - level) / level * 100 <= tolerance_pct
+    extreme = segment.min()
+    return (level - extreme) / level * 100 <= tolerance_pct
+
+
 def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT):
     """Qattiq sveчa soniga bog'lanmasdan, 'teng cho'qqilar' va 'teng tublar' asosida
     range chegaralarini topadi — range necha sveчa davom etgani muhim emas."""
@@ -106,16 +121,33 @@ def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_T
     if not high_clusters or not low_clusters:
         return None
 
-    # Eng so'nggi (joriy vaqtga eng yaqin) cluster'larni tanlaymiz - hozirgi range shu
-    best_high = max(high_clusters, key=lambda c: max(c["indices"]))
-    best_low = max(low_clusters, key=lambda c: max(c["indices"]))
+    # Eng so'nggidan boshlab, HAQIQATAN ushlab turilgan (orasida buzilmagan) cluster'ni qidiramiz
+    best_high = None
+    for c in sorted(high_clusters, key=lambda c: max(c["indices"]), reverse=True):
+        lo_idx, hi_idx = min(c["indices"]), max(c["indices"])
+        if is_level_respected(highs, lows, lo_idx, hi_idx, c["level"], tolerance_pct, "high"):
+            best_high = c
+            break
+    if best_high is None:
+        return None
+
+    best_low = None
+    for c in sorted(low_clusters, key=lambda c: max(c["indices"]), reverse=True):
+        lo_idx, hi_idx = min(c["indices"]), max(c["indices"])
+        if is_level_respected(highs, lows, lo_idx, hi_idx, c["level"], tolerance_pct, "low"):
+            best_low = c
+            break
+    if best_low is None:
+        return None
 
     range_high = best_high["level"]
     range_low = best_low["level"]
     if range_high <= range_low:
         return None
 
-    return {"range_high": range_high, "range_low": range_low}
+    range_start_idx = min(min(best_high["indices"]), min(best_low["indices"]))
+
+    return {"range_high": range_high, "range_low": range_low, "range_start_idx": range_start_idx}
 
 
 # ============================================================================
@@ -183,6 +215,28 @@ def detect_dynamic_spring_upthrust(df, swing_window=6, lookback=144,
 # 🎰 JACKPOT — Spring/Upthrust + TEST (eng yuqori ishonchli signal)
 # ============================================================================
 
+PRE_RANGE_LOOKBACK = 20      # range boshlanishidan oldin necha sveчa tekshiriladi
+PRE_RANGE_MIN_MOVE_MULT = 1.0  # oldingi harakat range balandligining necha barobari bo'lishi kerak
+
+
+def check_pre_range_movement(sub, range_start_idx, range_height,
+                               lookback_candles=PRE_RANGE_LOOKBACK, min_move_mult=PRE_RANGE_MIN_MOVE_MULT):
+    """Range paydo bo'lishidan OLDIN narx haqiqiy harakat qilganini tekshiradi
+    (yo'nalishidan qat'iy nazar) — butunlay tekis, harakatsiz joydan chiqqan
+    'range'larni rad etadi. Bu Wyckoff akkumulyatsiya/distribution'ning haqiqiy
+    bo'lishi uchun muhim shart: range'dan oldin narx qayerdandir kelgan bo'lishi kerak."""
+    if range_start_idx <= 0 or range_height <= 0:
+        return True  # ma'lumot yetarli emas - xavfsiz tomonga, filtrlamaymiz
+
+    start = max(0, range_start_idx - lookback_candles)
+    pre_segment = sub.iloc[start:range_start_idx]
+    if pre_segment.empty:
+        return True
+
+    pre_move = pre_segment["high"].max() - pre_segment["low"].min()
+    return pre_move >= range_height * min_move_mult
+
+
 def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT,
                             test_tolerance_pct=TEST_TOLERANCE_PCT, test_window=TEST_SEARCH_WINDOW,
                             confirm_candles=CONFIRM_CANDLES):
@@ -194,7 +248,10 @@ def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_
     3. Test'dan keyin narx keskin TESKARI tomonga ketadi — signal shu yerda beriladi
 
     Bu — oddiy sweep+return'dan farqli, qo'shimcha 'test' bosqichi bilan tasdiqlangan,
-    shuning uchun kamroq, lekin ancha ishonchliroq signal beradi."""
+    shuning uchun kamroq, lekin ancha ishonchliroq signal beradi.
+
+    Qo'shimcha filtr: range paydo bo'lishidan oldin haqiqiy narx harakati bo'lgan
+    bo'lishi kerak (tekis, harakatsiz joydan chiqqan range'lar rad etiladi)."""
     range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
     if range_info is None:
         return None
@@ -208,6 +265,9 @@ def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_
 
     range_high = range_info["range_high"]
     range_low = range_info["range_low"]
+
+    if not check_pre_range_movement(sub, range_info["range_start_idx"], range_high - range_low):
+        return None
 
     test_idx = n - 1 - confirm_candles
     if test_idx < swing_window:
