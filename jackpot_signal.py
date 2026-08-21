@@ -51,11 +51,16 @@ def find_swing_points(highs, lows, window=3, exclude_last=True):
 # MOSLASHUVCHAN RANGE ("TENG CHO'QQI/TUB" ASOSIDA)
 # ============================================================================
 
-def cluster_equal_levels(points, tolerance_pct, min_span=10):
+def cluster_equal_levels(points, tolerance_pct, min_span=10, mode="high"):
     """points: [(indeks, narx), ...]. Bir-biriga tolerance_pct ichida yaqin narxlarni
     guruhlaydi ("teng cho'qqi/tub"). Faqat vaqt bo'yicha yetarlicha uzoq tarqalgan
     (min_span sveчadan ko'p) guruhlarni qaytaradi — bu tasodifiy, yaqin-orada
-    joylashgan shovqinni chinakam qayta-qayta sinalgan darajadan ajratadi."""
+    joylashgan shovqinni chinakam qayta-qayta sinalgan darajadan ajratadi.
+
+    Chegara sifatida GURUHDAGI ENG EKSTREMAL nuqta olinadi (o'rtacha emas):
+    mode='high' -> guruhdagi eng YUQORI narx (haqiqiy sinalgan resistance)
+    mode='low'  -> guruhdagi eng PAST narx (haqiqiy sinalgan support)
+    """
     points = sorted(points, key=lambda p: p[1])
     clusters = []
     used = [False] * len(points)
@@ -76,7 +81,8 @@ def cluster_equal_levels(points, tolerance_pct, min_span=10):
                 used[j] = True
         indices = [idx for idx, _ in group]
         if len(group) >= 2 and (max(indices) - min(indices)) >= min_span:
-            level = sum(v for _, v in group) / len(group)
+            values = [v for _, v in group]
+            level = max(values) if mode == "high" else min(values)
             clusters.append({"level": level, "indices": indices})
     return clusters
 
@@ -95,8 +101,8 @@ def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_T
     if not swing_high_idx or not swing_low_idx:
         return None
 
-    high_clusters = cluster_equal_levels([(i, highs[i]) for i in swing_high_idx], tolerance_pct)
-    low_clusters = cluster_equal_levels([(i, lows[i]) for i in swing_low_idx], tolerance_pct)
+    high_clusters = cluster_equal_levels([(i, highs[i]) for i in swing_high_idx], tolerance_pct, mode="high")
+    low_clusters = cluster_equal_levels([(i, lows[i]) for i in swing_low_idx], tolerance_pct, mode="low")
     if not high_clusters or not low_clusters:
         return None
 
