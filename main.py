@@ -498,7 +498,7 @@ def evaluate_pending_signals():
     import datetime as dt
 
     log = load_signal_log()
-    pending = [e for e in log if not e.get("checked")]
+    pending = [e for e in log if not e.get("checked") and e.get("interval", "5min") != "1min"]
     if not pending:
         checked = [e for e in log if e.get("checked")]
         return _build_stats(log, checked)
@@ -616,7 +616,9 @@ def _build_stats(log, checked):
     import datetime as dt
 
     valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5"}
-    checked = [e for e in checked if e.get("outcome") in valid_outcomes]
+    # 1m butunlay chetlab o'tiladi - faqat 5min hisoblanadi
+    checked = [e for e in checked
+               if e.get("outcome") in valid_outcomes and e.get("interval", "5min") != "1min"]
 
     overall = _stats_for_subset(checked)
 
@@ -638,7 +640,7 @@ def _build_stats(log, checked):
             recent.append(e)
     recent_stats = _stats_for_subset(recent)
 
-    pending_entries = [e for e in log if not e.get("checked")]
+    pending_entries = [e for e in log if not e.get("checked") and e.get("interval", "5min") != "1min"]
     pending_breakdown = {0: 0, 2: 0, 3: 0}
     for e in pending_entries:
         bt = e.get("best_tp", 0)
@@ -661,7 +663,11 @@ def send_telegram_message(text):
     max_len = 4000
     chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
     for chunk in chunks:
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=15)
+        resp = requests.post(
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "disable_web_page_preview": True},
+            timeout=15,
+        )
         resp.raise_for_status()
 
 
