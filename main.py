@@ -215,27 +215,32 @@ def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min
         last_swing_high = highs[ph[-1]]
         is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
         if is_fresh_break:
-            # FVG qidiramiz (joriy svechadan oldin): lows[j] - highs[j-2] >= min_fvg_size
+            # FVG qidiramiz (BOS svechasining o'zi ham FVG hosil qilgan bo'lishi mumkin,
+            # shuning uchun "cur"ni ham qamrab olamiz): lows[j] - highs[j-2] >= min_fvg_size
             fvg_idx = None
-            for j in range(swing_window, cur):
+            for j in range(swing_window, cur + 1):
                 if j >= 2 and (lows[j] - highs[j - 2]) >= min_fvg_size:
                     fvg_idx = j
             if fvg_idx is not None:
-                # Sweep qidiramiz (FVG'dan oldin): past nuqta swing low'dan yetarlicha
-                # pastga tushib (min_sweep_depth), keyin qaytgan
+                # Sweep qidiramiz (FVG'dan oldin): barcha mos nomzodlar orasidan
+                # ENG CHUQUR (eng past) sweep'ni tanlaymiz, birinchi topilganini emas
+                best_sweep = None
                 for k in range(swing_window, fvg_idx):
                     pl = prior_lows_before(k)
                     if pl:
                         sl = lows[pl[-1]]
                         if (sl - lows[k]) >= min_sweep_depth and closes[k] > sl:
-                            return {
-                                "type": "smc_bullish",
-                                "sweep_time": str(times[k]),
-                                "sweep_level": sl,
-                                "fvg_time": str(times[fvg_idx]),
-                                "bos_level": last_swing_high,
-                                "current_close": closes[cur],
-                            }
+                            if best_sweep is None or lows[k] < best_sweep["low"]:
+                                best_sweep = {"idx": k, "low": lows[k], "sl": sl}
+                if best_sweep is not None:
+                    return {
+                        "type": "smc_bullish",
+                        "sweep_time": str(times[best_sweep["idx"]]),
+                        "sweep_level": best_sweep["sl"],
+                        "fvg_time": str(times[fvg_idx]),
+                        "bos_level": last_swing_high,
+                        "current_close": closes[cur],
+                    }
 
     # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga (joriy svechada) ---
     pl2 = prior_lows_before(cur)
@@ -244,28 +249,32 @@ def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min
         is_fresh_break = closes[cur] < last_swing_low and closes[cur - 1] >= last_swing_low
         if is_fresh_break:
             fvg_idx = None
-            for j in range(swing_window, cur):
+            for j in range(swing_window, cur + 1):
                 if j >= 2 and (lows[j - 2] - highs[j]) >= min_fvg_size:
                     fvg_idx = j
             if fvg_idx is not None:
+                best_sweep = None
                 for k in range(swing_window, fvg_idx):
                     ph2 = prior_highs_before(k)
                     if ph2:
                         sh = highs[ph2[-1]]
                         if (highs[k] - sh) >= min_sweep_depth and closes[k] < sh:
-                            return {
-                                "type": "smc_bearish",
-                                "sweep_time": str(times[k]),
-                                "sweep_level": sh,
-                                "fvg_time": str(times[fvg_idx]),
-                                "bos_level": last_swing_low,
-                                "current_close": closes[cur],
-                            }
+                            if best_sweep is None or highs[k] > best_sweep["high"]:
+                                best_sweep = {"idx": k, "high": highs[k], "sh": sh}
+                if best_sweep is not None:
+                    return {
+                        "type": "smc_bearish",
+                        "sweep_time": str(times[best_sweep["idx"]]),
+                        "sweep_level": best_sweep["sh"],
+                        "fvg_time": str(times[fvg_idx]),
+                        "bos_level": last_swing_low,
+                        "current_close": closes[cur],
+                    }
 
     return None
 
 
-def get_trend_bias(df, period=50, threshold_pct=0.05):
+def get_trend_bias(df, period=144, threshold_pct=0.05):
     """Mavjud ma'lumot asosida (qo'shimcha API so'rovisiz) umumiy trend yo'nalishini
     taxminan aniqlaydi: joriy narxni so'nggi `period` sveчaning o'rtacha narxi bilan
     solishtiradi. Bu haqiqiy yuqori timeframe emas, balki tezkor va bepul proksi."""
@@ -688,6 +697,17 @@ def send_telegram_document(file_path, caption=""):
 # REJIM 1: SIGNAL TEKSHIRUV (har 5 daqiqada)
 # ============================================================================
 
+def is_active_session(timestamp):
+    """London ochilishidan Nyu-York yopilishigacha bo'lgan (fasllarga qarab suriladigan)
+    davrni xavfsiz qamrab oladigan UTC oralig'i: 06:00 - 23:00. Bu oraliqdan tashqarida
+    (asosan Osiyo sessiyasi) savdo hajmi kamroq, harakat ko'proq shovqinli bo'ladi."""
+    try:
+        hour = timestamp.hour
+    except AttributeError:
+        return True  # vaqt aniqlanmasa, filtrlamaymiz (xavfsiz tomonga)
+    return 6 <= hour < 23
+
+
 def run_signal_check(df, price_data, interval="5min"):
     # Eng kuchli signal birinchi tekshiriladi — agar u chiqsa, boshqalar tekshirilmaydi
     jackpot = detect_jackpot_signal(df, lookback=144)
@@ -719,8 +739,15 @@ def run_signal_check(df, price_data, interval="5min"):
         bias_uz = "YUQORIGA (bullish)" if bias == "bullish" else "PASTGA (bearish)"
         trend_warning = (
             f"\n\n⚠️ DIQQAT: umumiy narx harakati {bias_uz} yo'nalishda "
-            f"(so'nggi {min(50, len(df))} sveчa o'rtachasiga nisbatan) — bu signal "
+            f"(so'nggi {min(144, len(df))} sveчa o'rtachasiga nisbatan) — bu signal "
             f"UMUMIY TREND'GA QARSHI bo'lishi mumkin, ehtiyot bo'ling."
+        )
+
+    session_warning = ""
+    if not is_active_session(df.index[-1]):
+        session_warning = (
+            "\n\n⏰ DIQQAT: bu signal London/Nyu-York savdo sessiyasidan TASHQARIDA "
+            "chiqdi (kam hajmli davr) — ehtiyot bo'ling."
         )
 
     if signal["type"] == "jackpot_spring":
@@ -774,7 +801,7 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Voqea narxi: {signal['event_close']:.2f} → hozir: {signal['current_close']:.2f}"
         )
 
-    caption += trend_warning
+    caption += trend_warning + session_warning
     send_telegram_document(chart_path, caption=caption)
 
     # Signal tarixga yoziladi - natijasi keyinroq (soatlik status'da) tekshiriladi
