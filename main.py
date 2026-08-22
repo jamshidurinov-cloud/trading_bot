@@ -176,10 +176,21 @@ from jackpot_signal import (
 )
 
 
-def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15):
+PROMINENCE_WINDOW = 40   # "ajralib turgan, ko'zga tashlanadigan" darajani aniqlash uchun oyna
+PROMINENCE_MIN_HISTORY = 10  # ishonchli referens uchun kamida shuncha oldingi sveцha kerak
+
+
+def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
+                          prominence_window=PROMINENCE_WINDOW):
     """ENG KUCHLI SMC/ICT signal: Liquidity Sweep + FVG + BOS/CHoCH ketma-ketligi.
     Faqat BOS/CHoCH aynan JORIY (oxirgi) svechada tasdiqlansa signal beradi —
     shu bilan har bir voqea faqat bir marta xabar qilinadi.
+
+    Sweep va BOS uchun referens daraja endi oddiy 6-svechalik "swing" emas, balki
+    oldingi `prominence_window` (40) sveчaning ENG EKSTREMAL narxi — ya'ni "ajralib
+    turgan, ko'zga tashlanadigan" daraja (kimdir haqiqatan shu yerga order/stop
+    qo'ygan bo'lishi ehtimoli yuqori bo'lgan nuqta), oddiy tasodifiy mahalliy
+    ekstremum emas.
 
     Soxta (ahamiyatsiz) signallarni kamaytirish uchun ikkita filtr qo'shilgan:
     - min_fvg_mult: FVG (bo'shliq) kamida o'rtacha svecha kattaligining shuncha
@@ -202,36 +213,42 @@ def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min
     min_fvg_size = avg_candle_range * min_fvg_mult
     min_sweep_depth = avg_candle_range * min_sweep_mult
 
-    swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=swing_window, exclude_last=True)
-    if not swing_high_idx or not swing_low_idx:
-        return None
+    def prominent_high(idx):
+        """idx'dan oldingi (idx'ni o'z ichiga olmagan) oynadagi eng yuqori narx."""
+        start = max(0, idx - prominence_window)
+        if idx - start < PROMINENCE_MIN_HISTORY:
+            return None
+        return highs[start:idx].max()
 
-    prior_highs_before = lambda idx: [i for i in swing_high_idx if i < idx]
-    prior_lows_before = lambda idx: [i for i in swing_low_idx if i < idx]
+    def prominent_low(idx):
+        """idx'dan oldingi (idx'ni o'z ichiga olmagan) oynadagi eng past narx."""
+        start = max(0, idx - prominence_window)
+        if idx - start < PROMINENCE_MIN_HISTORY:
+            return None
+        return lows[start:idx].min()
 
     # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
-    ph = prior_highs_before(cur)
-    if ph:
-        last_swing_high = highs[ph[-1]]
+    last_swing_high = prominent_high(cur)
+    if last_swing_high is not None:
         is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
         if is_fresh_break:
             # FVG qidiramiz (BOS svechasining o'zi ham FVG hosil qilgan bo'lishi mumkin,
             # shuning uchun "cur"ni ham qamrab olamiz): lows[j] - highs[j-2] >= min_fvg_size
             fvg_idx = None
-            for j in range(swing_window, cur + 1):
-                if j >= 2 and (lows[j] - highs[j - 2]) >= min_fvg_size:
+            for j in range(2, cur + 1):
+                if (lows[j] - highs[j - 2]) >= min_fvg_size:
                     fvg_idx = j
             if fvg_idx is not None:
                 # Sweep qidiramiz (FVG'dan oldin): barcha mos nomzodlar orasidan
                 # ENG CHUQUR (eng past) sweep'ni tanlaymiz, birinchi topilganini emas
                 best_sweep = None
-                for k in range(swing_window, fvg_idx):
-                    pl = prior_lows_before(k)
-                    if pl:
-                        sl = lows[pl[-1]]
-                        if (sl - lows[k]) >= min_sweep_depth and closes[k] > sl:
-                            if best_sweep is None or lows[k] < best_sweep["low"]:
-                                best_sweep = {"idx": k, "low": lows[k], "sl": sl}
+                for k in range(1, fvg_idx):
+                    sl = prominent_low(k)
+                    if sl is None:
+                        continue
+                    if (sl - lows[k]) >= min_sweep_depth and closes[k] > sl:
+                        if best_sweep is None or lows[k] < best_sweep["low"]:
+                            best_sweep = {"idx": k, "low": lows[k], "sl": sl}
                 if best_sweep is not None:
                     return {
                         "type": "smc_bullish",
@@ -243,24 +260,23 @@ def detect_smc_composite(df, swing_window=6, lookback=144, min_fvg_mult=0.5, min
                     }
 
     # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga (joriy svechada) ---
-    pl2 = prior_lows_before(cur)
-    if pl2:
-        last_swing_low = lows[pl2[-1]]
+    last_swing_low = prominent_low(cur)
+    if last_swing_low is not None:
         is_fresh_break = closes[cur] < last_swing_low and closes[cur - 1] >= last_swing_low
         if is_fresh_break:
             fvg_idx = None
-            for j in range(swing_window, cur + 1):
-                if j >= 2 and (lows[j - 2] - highs[j]) >= min_fvg_size:
+            for j in range(2, cur + 1):
+                if (lows[j - 2] - highs[j]) >= min_fvg_size:
                     fvg_idx = j
             if fvg_idx is not None:
                 best_sweep = None
-                for k in range(swing_window, fvg_idx):
-                    ph2 = prior_highs_before(k)
-                    if ph2:
-                        sh = highs[ph2[-1]]
-                        if (highs[k] - sh) >= min_sweep_depth and closes[k] < sh:
-                            if best_sweep is None or highs[k] > best_sweep["high"]:
-                                best_sweep = {"idx": k, "high": highs[k], "sh": sh}
+                for k in range(1, fvg_idx):
+                    sh = prominent_high(k)
+                    if sh is None:
+                        continue
+                    if (highs[k] - sh) >= min_sweep_depth and closes[k] < sh:
+                        if best_sweep is None or highs[k] > best_sweep["high"]:
+                            best_sweep = {"idx": k, "high": highs[k], "sh": sh}
                 if best_sweep is not None:
                     return {
                         "type": "smc_bearish",
