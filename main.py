@@ -214,23 +214,33 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
     min_fvg_size = avg_candle_range * min_fvg_mult
     min_sweep_depth = avg_candle_range * min_sweep_mult
 
-    def prominent_high(idx):
-        """idx'dan oldingi oynadagi eng yuqori narx (Sweep uchun)."""
-        start = max(0, idx - prominence_window)
-        if idx - start < PROMINENCE_MIN_HISTORY:
-            return None
-        return highs[start:idx].max()
-
-    def prominent_low(idx):
-        """idx'dan oldingi oynadagi eng past narx (Sweep uchun)."""
-        start = max(0, idx - prominence_window)
-        if idx - start < PROMINENCE_MIN_HISTORY:
-            return None
-        return lows[start:idx].min()
-
     swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=bos_swing_window, exclude_last=True)
     nearest_swing_high_before = lambda idx: next((i for i in reversed(swing_high_idx) if i < idx), None)
     nearest_swing_low_before = lambda idx: next((i for i in reversed(swing_low_idx) if i < idx), None)
+
+    def prominent_high(idx):
+        """idx'dan oldingi `prominence_window` ichidagi HAQIQIY swing cho'qqilar
+        orasidan eng yuqorisi (Sweep uchun). Oddiy oyna maksimumi emas — faqat
+        chinakam 'burilish qilgan' (bos_swing_window bilan tasdiqlangan) nuqtalar
+        hisobga olinadi, tasodifiy oraliq nuqta emas."""
+        start = max(0, idx - prominence_window)
+        if idx - start < PROMINENCE_MIN_HISTORY:
+            return None
+        candidates = [i for i in swing_high_idx if start <= i < idx]
+        if not candidates:
+            return None
+        return max(highs[i] for i in candidates)
+
+    def prominent_low(idx):
+        """idx'dan oldingi `prominence_window` ichidagi HAQIQIY swing tublar
+        orasidan eng pasti (Sweep uchun)."""
+        start = max(0, idx - prominence_window)
+        if idx - start < PROMINENCE_MIN_HISTORY:
+            return None
+        candidates = [i for i in swing_low_idx if start <= i < idx]
+        if not candidates:
+            return None
+        return min(lows[i] for i in candidates)
 
     # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
     bos_ref_idx = nearest_swing_high_before(cur)
