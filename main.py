@@ -472,14 +472,19 @@ SL_BUFFER = 0.03  # sweep darajasidan qo'shimcha zaxira (USD) - tasodifiy tebran
 
 
 def compute_sl_level(signal):
-    """Signal strukturasidan SL (stop-loss) darajasini aniqlaydi:
-    bullish uchun eng past nuqta, bearish uchun eng yuqori nuqta."""
-    if signal["type"] in ("smc_bullish", "smc_bearish"):
-        return signal["sweep_level"]
+    """Signal strukturasidan SL (stop-loss) darajasini aniqlaydi, kichik zaxira
+    (SL_BUFFER) bilan — bu narx aynan sweep/event darajasiga qaytadan tegib,
+    lekin buzmasdan o'tgan holatda SL tasodifan darhol urilib qolishining oldini
+    oladi. Barcha signal turlariga bir xilda qo'llanadi (avval faqat JACKPOT'da
+    bor edi, endi barchasida)."""
+    if signal["type"] == "smc_bullish":
+        return signal["sweep_level"] - SL_BUFFER
+    if signal["type"] == "smc_bearish":
+        return signal["sweep_level"] + SL_BUFFER
     if signal["type"] == "dynamic_spring":
-        return signal["event_low"]
+        return signal["event_low"] - SL_BUFFER
     if signal["type"] == "dynamic_upthrust":
-        return signal["event_high"]
+        return signal["event_high"] + SL_BUFFER
     if signal["type"] == "jackpot_spring":
         return signal["event_low"] - SL_BUFFER
     return signal["event_high"] + SL_BUFFER  # jackpot_upthrust
