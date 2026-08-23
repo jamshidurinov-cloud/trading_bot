@@ -176,21 +176,22 @@ from jackpot_signal import (
 )
 
 
-PROMINENCE_WINDOW = 40   # "ajralib turgan, ko'zga tashlanadigan" darajani aniqlash uchun oyna
-PROMINENCE_MIN_HISTORY = 10  # ishonchli referens uchun kamida shuncha oldingi sveцha kerak
+PROMINENCE_WINDOW = 40   # Sweep uchun: "ajralib turgan" darajani aniqlash oynasi
+PROMINENCE_MIN_HISTORY = 10  # ishonchli referens uchun kamida shuncha oldingi sveчa kerak
+BOS_SWING_WINDOW = 6     # BOS uchun: eng yaqin tasdiqlangan swing nuqta oynasi
 
 
 def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
-                          prominence_window=PROMINENCE_WINDOW):
+                          prominence_window=PROMINENCE_WINDOW, bos_swing_window=BOS_SWING_WINDOW):
     """ENG KUCHLI SMC/ICT signal: Liquidity Sweep + FVG + BOS/CHoCH ketma-ketligi.
     Faqat BOS/CHoCH aynan JORIY (oxirgi) svechada tasdiqlansa signal beradi —
     shu bilan har bir voqea faqat bir marta xabar qilinadi.
 
-    Sweep va BOS uchun referens daraja endi oddiy 6-svechalik "swing" emas, balki
-    oldingi `prominence_window` (40) sveчaning ENG EKSTREMAL narxi — ya'ni "ajralib
-    turgan, ko'zga tashlanadigan" daraja (kimdir haqiqatan shu yerga order/stop
-    qo'ygan bo'lishi ehtimoli yuqori bo'lgan nuqta), oddiy tasodifiy mahalliy
-    ekstremum emas.
+    Ikkita turli referens ishlatiladi:
+    - SWEEP uchun: oldingi `prominence_window` (40) sveчaning ENG EKSTREMAL narxi —
+      "ajralib turgan, ko'zga tashlanadigan" daraja
+    - BOS uchun: ENG YAQIN tasdiqlangan swing nuqta (`bos_swing_window`=6 sveчa) —
+      BOS'ning vazifasi narx yo'nalishi tezkor o'zgarganini payqash
 
     Soxta (ahamiyatsiz) signallarni kamaytirish uchun ikkita filtr qo'shilgan:
     - min_fvg_mult: FVG (bo'shliq) kamida o'rtacha svecha kattaligining shuncha
@@ -214,21 +215,26 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
     min_sweep_depth = avg_candle_range * min_sweep_mult
 
     def prominent_high(idx):
-        """idx'dan oldingi (idx'ni o'z ichiga olmagan) oynadagi eng yuqori narx."""
+        """idx'dan oldingi oynadagi eng yuqori narx (Sweep uchun)."""
         start = max(0, idx - prominence_window)
         if idx - start < PROMINENCE_MIN_HISTORY:
             return None
         return highs[start:idx].max()
 
     def prominent_low(idx):
-        """idx'dan oldingi (idx'ni o'z ichiga olmagan) oynadagi eng past narx."""
+        """idx'dan oldingi oynadagi eng past narx (Sweep uchun)."""
         start = max(0, idx - prominence_window)
         if idx - start < PROMINENCE_MIN_HISTORY:
             return None
         return lows[start:idx].min()
 
+    swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=bos_swing_window, exclude_last=True)
+    nearest_swing_high_before = lambda idx: next((i for i in reversed(swing_high_idx) if i < idx), None)
+    nearest_swing_low_before = lambda idx: next((i for i in reversed(swing_low_idx) if i < idx), None)
+
     # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
-    last_swing_high = prominent_high(cur)
+    bos_ref_idx = nearest_swing_high_before(cur)
+    last_swing_high = highs[bos_ref_idx] if bos_ref_idx is not None else None
     if last_swing_high is not None:
         is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
         if is_fresh_break:
@@ -260,7 +266,8 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
                     }
 
     # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga (joriy svechada) ---
-    last_swing_low = prominent_low(cur)
+    bos_ref_idx2 = nearest_swing_low_before(cur)
+    last_swing_low = lows[bos_ref_idx2] if bos_ref_idx2 is not None else None
     if last_swing_low is not None:
         is_fresh_break = closes[cur] < last_swing_low and closes[cur - 1] >= last_swing_low
         if is_fresh_break:
