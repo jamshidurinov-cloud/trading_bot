@@ -103,7 +103,7 @@ def get_gold_candles(interval="5min", outputsize=100):
         "timezone": "UTC",
         "apikey": TWELVEDATA_API_KEY,
     }
-    resp = requests.get(url, params=params, timeout=15)
+    resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
