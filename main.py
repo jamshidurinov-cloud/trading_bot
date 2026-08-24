@@ -818,14 +818,22 @@ def _build_stats(log, checked):
 # ============================================================================
 
 def send_telegram_message(text):
-    """Matnli xabar yuboradi. Uzun bo'lsa avtomatik bo'laklarga bo'ladi."""
+    """Matnli xabar yuboradi. Uzun bo'lsa avtomatik bo'laklarga bo'ladi.
+    Eslatma: 'remove_keyboard' - bu avvalgi (boshqa loyihadan qolgan) reply
+    keyboard panelini butunlay o'chirib tashlash uchun, xavfsiz - doim yuborilsa
+    ham zarari yo'q."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     max_len = 4000
     chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
     for chunk in chunks:
         resp = requests.post(
             url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "disable_web_page_preview": True},
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": chunk,
+                "disable_web_page_preview": True,
+                "reply_markup": {"remove_keyboard": True},
+            },
             timeout=15,
         )
         resp.raise_for_status()
