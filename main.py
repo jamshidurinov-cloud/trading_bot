@@ -531,6 +531,8 @@ def log_new_signal(signal, price_data, interval):
         "tp2_level": entry_price + sign * 2 * risk,
         "tp3_level": entry_price + sign * 3 * risk,
         "tp5_level": entry_price + sign * 5 * risk,
+        "tp10_level": entry_price + sign * 10 * risk,
+        "tp15_level": entry_price + sign * 15 * risk,
         "best_tp": 0,
         "checked": False,
         "outcome": None,
@@ -599,7 +601,8 @@ def evaluate_pending_signals():
 
         direction = entry["direction"]
         sl = entry["sl_level"]
-        tp_levels = {2: entry["tp2_level"], 3: entry["tp3_level"], 5: entry["tp5_level"]}
+        tp_levels = {2: entry.get("tp2_level"), 3: entry.get("tp3_level"), 5: entry.get("tp5_level"),
+                     10: entry.get("tp10_level"), 15: entry.get("tp15_level")}
         best_tp_before = entry.get("best_tp", 0)
         best_tp = best_tp_before
         hit_sl = False
@@ -612,15 +615,15 @@ def evaluate_pending_signals():
                 hit_sl = True
                 break
 
-            for level_num in (2, 3, 5):
-                if best_tp >= level_num:
+            for level_num in (2, 3, 5, 10, 15):
+                if best_tp >= level_num or tp_levels[level_num] is None:
                     continue
                 level_price = tp_levels[level_num]
                 tp_touched = (hi >= level_price) if direction == "bullish" else (lo <= level_price)
                 if tp_touched:
                     best_tp = level_num
 
-            if best_tp == 5:
+            if best_tp == 15:
                 break
 
         entry["best_tp"] = best_tp
@@ -628,9 +631,9 @@ def evaluate_pending_signals():
             entry["checked"] = True
             entry["outcome"] = f"tp{best_tp}" if best_tp else "loss"
             changed = True
-        elif best_tp == 5:
+        elif best_tp == 15:
             entry["checked"] = True
-            entry["outcome"] = "tp5"
+            entry["outcome"] = "tp15"
             changed = True
         elif (now - signal_time).total_seconds() > timeout_sec:
             entry["checked"] = True
@@ -646,6 +649,9 @@ def evaluate_pending_signals():
     return _build_stats(log, checked)
 
 
+R_MAP = {"loss": -1, "timeout": 0, "tp2": 2, "tp3": 3, "tp5": 5, "tp10": 10, "tp15": 15}
+
+
 def _stats_for_subset(checked):
     total = len(checked)
     losses = sum(1 for e in checked if e["outcome"] == "loss")
@@ -653,11 +659,16 @@ def _stats_for_subset(checked):
     tp2 = sum(1 for e in checked if e["outcome"] == "tp2")
     tp3 = sum(1 for e in checked if e["outcome"] == "tp3")
     tp5 = sum(1 for e in checked if e["outcome"] == "tp5")
-    wins = tp2 + tp3 + tp5
+    tp10 = sum(1 for e in checked if e["outcome"] == "tp10")
+    tp15 = sum(1 for e in checked if e["outcome"] == "tp15")
+    wins = tp2 + tp3 + tp5 + tp10 + tp15
     win_rate = round(wins / total * 100, 1) if total else None
+    total_r = sum(R_MAP.get(e["outcome"], 0) for e in checked)
+    avg_r = round(total_r / total, 2) if total else None
     return {
         "total_checked": total, "wins": wins, "losses": losses, "timeouts": timeouts,
-        "tp2": tp2, "tp3": tp3, "tp5": tp5, "win_rate": win_rate,
+        "tp2": tp2, "tp3": tp3, "tp5": tp5, "tp10": tp10, "tp15": tp15, "win_rate": win_rate,
+        "total_r": total_r, "avg_r": avg_r,
     }
 
 
@@ -667,7 +678,7 @@ ROLLING_WINDOW_HOURS = 4  # "so'nggi N soatlik" statistika oynasi
 def _build_stats(log, checked):
     import datetime as dt
 
-    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5"}
+    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5", "tp10", "tp15"}
     # 1m butunlay chetlab o'tiladi - faqat 5min hisoblanadi
     checked = [e for e in checked
                if e.get("outcome") in valid_outcomes and e.get("interval", "5min") != "1min"]
@@ -678,6 +689,21 @@ def _build_stats(log, checked):
     for iv in sorted(set(e.get("interval", "5min") for e in checked)):
         subset = [e for e in checked if e.get("interval", "5min") == iv]
         by_interval[iv] = _stats_for_subset(subset)
+
+    # Signal turi bo'yicha (JACKPOT, OB/FVG, SMC, oddiy Spring/Upthrust) - qaysi
+    # strategiya eng yaxshi ishlayotganini ko'rish uchun. bullish/bearish birlashtiriladi
+    # (masalan jackpot_spring + jackpot_upthrust -> "jackpot"), chunki yo'nalish emas,
+    # strategiya turi muhim.
+    TYPE_GROUPS = {
+        "jackpot_spring": "jackpot", "jackpot_upthrust": "jackpot",
+        "ob_fvg_bullish": "ob_fvg", "ob_fvg_bearish": "ob_fvg",
+        "smc_bullish": "smc", "smc_bearish": "smc",
+        "dynamic_spring": "dynamic", "dynamic_upthrust": "dynamic",
+    }
+    by_type = {}
+    for grp in sorted(set(TYPE_GROUPS.get(e.get("type"), "boshqa") for e in checked)):
+        subset = [e for e in checked if TYPE_GROUPS.get(e.get("type"), "boshqa") == grp]
+        by_type[grp] = _stats_for_subset(subset)
 
     # So'nggi ROLLING_WINDOW_HOURS soat ichida YOPILGAN signallar (umumiy statistika
     # o'chirilmaydi, bu faqat qo'shimcha, "hozir qanday ketyapti" ko'rsatkichi)
@@ -701,6 +727,7 @@ def _build_stats(log, checked):
     overall["pending"] = len(pending_entries)
     overall["pending_breakdown"] = pending_breakdown
     overall["by_interval"] = by_interval
+    overall["by_type"] = by_type
     overall["recent"] = recent_stats
     return overall
 
@@ -930,27 +957,45 @@ def run_hourly_status(df, price_data, interval="5min"):
             if stats and stats["total_checked"] > 0:
                 lines.append(
                     f"\n📈 Umumiy statistika: {stats['total_checked']} ta yopilgan signal — "
-                    f"aniqlik: {stats['win_rate']}%\n"
-                    f"🔥 TP5x: {stats['tp5']} | 🟢 TP3x: {stats['tp3']} | 🟡 TP2x: {stats['tp2']} | "
+                    f"aniqlik: {stats['win_rate']}%, jami: {stats['total_r']:+g}R "
+                    f"(o'rtacha {stats['avg_r']:+g}R/signal)\n"
+                    f"🚀 TP15x: {stats['tp15']} | 💎 TP10x: {stats['tp10']} | 🔥 TP5x: {stats['tp5']} | "
+                    f"🟢 TP3x: {stats['tp3']} | 🟡 TP2x: {stats['tp2']} | "
                     f"❌ SL: {stats['losses']} | ⏱ muddati o'tgan: {stats['timeouts']}"
                 )
                 for iv, s in stats["by_interval"].items():
                     lines.append(
-                        f"\n▫️ [{iv}]: {s['total_checked']} ta — aniqlik: {s['win_rate']}% "
-                        f"(🔥{s['tp5']} 🟢{s['tp3']} 🟡{s['tp2']} ❌{s['losses']} ⏱{s['timeouts']})"
+                        f"\n▫️ [{iv}]: {s['total_checked']} ta — aniqlik: {s['win_rate']}%, "
+                        f"{s['total_r']:+g}R (o'rt {s['avg_r']:+g}R) "
+                        f"(🚀{s['tp15']} 💎{s['tp10']} 🔥{s['tp5']} 🟢{s['tp3']} 🟡{s['tp2']} "
+                        f"❌{s['losses']} ⏱{s['timeouts']})"
+                    )
+                lines.append("\n📊 Strategiya bo'yicha:")
+                TYPE_LABELS = {"jackpot": "🎰 JACKPOT", "ob_fvg": "📍 OB/FVG",
+                               "smc": "🔥 SMC", "dynamic": "🟢 Spring/Upthrust", "boshqa": "Boshqa"}
+                for grp, s in stats["by_type"].items():
+                    label = TYPE_LABELS.get(grp, grp)
+                    lines.append(
+                        f"\n{label}: {s['total_checked']} ta — aniqlik: {s['win_rate']}%, "
+                        f"{s['total_r']:+g}R (o'rt {s['avg_r']:+g}R)"
                     )
                 r = stats["recent"]
                 if r["total_checked"] > 0:
                     lines.append(
                         f"\n🕓 So'nggi {ROLLING_WINDOW_HOURS} soat: {r['total_checked']} ta — "
-                        f"aniqlik: {r['win_rate']}% "
-                        f"(🔥{r['tp5']} 🟢{r['tp3']} 🟡{r['tp2']} ❌{r['losses']} ⏱{r['timeouts']})"
+                        f"aniqlik: {r['win_rate']}%, {r['total_r']:+g}R "
+                        f"(🚀{r['tp15']} 💎{r['tp10']} 🔥{r['tp5']} 🟢{r['tp3']} 🟡{r['tp2']} "
+                        f"❌{r['losses']} ⏱{r['timeouts']})"
                     )
                 else:
                     lines.append(f"\n🕓 So'nggi {ROLLING_WINDOW_HOURS} soat: yopilgan signal yo'q.")
                 if stats["pending"] > 0:
                     pb = stats["pending_breakdown"]
                     parts = []
+                    if pb.get(10, 0) > 0:
+                        parts.append(f"💎 {pb[10]} ta 10x da")
+                    if pb.get(5, 0) > 0:
+                        parts.append(f"🔥 {pb[5]} ta 5x da")
                     if pb.get(3, 0) > 0:
                         parts.append(f"🟢 {pb[3]} ta 3x da")
                     if pb.get(2, 0) > 0:
