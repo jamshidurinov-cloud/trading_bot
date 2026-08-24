@@ -326,6 +326,87 @@ def get_trend_bias(df, period=144, threshold_pct=0.05):
     return "neutral"
 
 
+def get_htf_bias(df, htf="1h", period=50, threshold_pct=0.05):
+    """CHINAKAM kattaroq timeframe (masalan 1 soatlik) trend yo'nalishini aniqlaydi.
+    Qo'shimcha API so'rovisiz — mavjud (5m yoki 1m) ma'lumotni 1H svechalarga
+    'yig'ib chiqaradi' (resample), so'ng shu asosda SMA solishtiradi.
+
+    Oxirgi (hali to'liq tugallanmagan) 1H sveчa har doim tashlab yuboriladi —
+    aks holda to'liq bo'lmagan svechani "yakunlangan" deb noto'g'ri hisoblash xavfi bor."""
+    if len(df) < 10:
+        return "neutral"
+
+    htf_df = df.resample(htf).agg({
+        "open": "first", "high": "max", "low": "min", "close": "last",
+    }).dropna()
+
+    if len(htf_df) < 2:
+        return "neutral"
+
+    htf_df = htf_df.iloc[:-1]  # oxirgi, hali tugallanmagan 1H sveчani tashlab yuboramiz
+
+    if len(htf_df) < period:
+        return "neutral"
+
+    sma = htf_df["close"].tail(period).mean()
+    current = df["close"].iloc[-1]  # eng joriy (haqiqiy) narx
+    if sma == 0:
+        return "neutral"
+    diff_pct = (current - sma) / sma * 100
+    if diff_pct > threshold_pct:
+        return "bullish"
+    elif diff_pct < -threshold_pct:
+        return "bearish"
+    return "neutral"
+
+
+def find_htf_zones(df, htf="1h", lookback=30, min_fvg_mult=0.5, min_ob_mult=1.5):
+    """Kattaroq timeframe'dagi (1H) so'nggi OB va FVG zonalarini topadi — bu MTF
+    (5m/1m) signal chiqqanda, narx qo'shimcha ravishda 1H'dagi muhim zonaga ham
+    to'g'ri kelayotganini (yoki kelmayotganini) ma'lumot sifatida ko'rsatish uchun."""
+    if len(df) < 10:
+        return []
+
+    htf_df = df.resample(htf).agg({
+        "open": "first", "high": "max", "low": "min", "close": "last",
+    }).dropna()
+    if len(htf_df) < 2:
+        return []
+    htf_df = htf_df.iloc[:-1]  # oxirgi, tugallanmagan 1H sveчani tashlab yuboramiz
+    if len(htf_df) < 5:
+        return []
+
+    sub = htf_df.tail(lookback)
+    highs = sub["high"].values
+    lows = sub["low"].values
+    opens = sub["open"].values
+    closes = sub["close"].values
+    n = len(sub)
+    avg_range = (sub["high"] - sub["low"]).mean()
+    if avg_range == 0:
+        return []
+    min_fvg_size = avg_range * min_fvg_mult
+
+    zones = []
+
+    # FVG zonalari (3-sveчalik bo'shliqlar)
+    for j in range(2, n):
+        if lows[j] - highs[j - 2] >= min_fvg_size:
+            zones.append((highs[j - 2], lows[j], "bullish_fvg"))
+        if lows[j - 2] - highs[j] >= min_fvg_size:
+            zones.append((highs[j], lows[j - 2], "bearish_fvg"))
+
+    # OB zonalari (qarama-qarshi svecha + undan keyingi kuchli harakat)
+    for i in range(0, n - 2):
+        move_after = closes[min(i + 2, n - 1)] - closes[i]
+        if closes[i] < opens[i] and move_after >= avg_range * min_ob_mult:
+            zones.append((lows[i], highs[i], "bullish_ob"))
+        if closes[i] > opens[i] and -move_after >= avg_range * min_ob_mult:
+            zones.append((lows[i], highs[i], "bearish_ob"))
+
+    return zones
+
+
 def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
     """Joriy holat qanday diapazon/uchburchak turiga to'g'ri kelishini aniqlaydi:
     - bullish_squeeze: pastki chegara ko'tarilib, yuqoriga qisilmoqda
@@ -807,19 +888,30 @@ def run_signal_check(df, price_data, interval="5min"):
     signal_direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
     trend_warning = ""
     if bias != "neutral" and bias != signal_direction:
-        bias_uz = "YUQORIGA (bullish)" if bias == "bullish" else "PASTGA (bearish)"
-        trend_warning = (
-            f"\n\n⚠️ DIQQAT: umumiy narx harakati {bias_uz} yo'nalishda "
-            f"(so'nggi {min(144, len(df))} sveчa o'rtachasiga nisbatan) — bu signal "
-            f"UMUMIY TREND'GA QARSHI bo'lishi mumkin, ehtiyot bo'ling."
-        )
+        bias_uz = "yuqoriga" if bias == "bullish" else "pastga"
+        trend_warning = f"\n⚠️ Trendga qarshi (umumiy {bias_uz})"
 
     session_warning = ""
     if not is_active_session(df.index[-1]):
-        session_warning = (
-            "\n\n⏰ DIQQAT: bu signal London/Nyu-York savdo sessiyasidan TASHQARIDA "
-            "chiqdi (kam hajmli davr) — ehtiyot bo'ling."
-        )
+        session_warning = "\n⏰ Sessiyadan tashqarida (kam hajm)"
+
+    htf_warning = ""
+    htf_bias = get_htf_bias(df)
+    if htf_bias != "neutral" and htf_bias != signal_direction:
+        htf_bias_uz = "yuqoriga" if htf_bias == "bullish" else "pastga"
+        htf_warning = f"\n📐 1H trendga qarshi (umumiy {htf_bias_uz})"
+
+    htf_zone_info = ""
+    entry_price = float(price_data["price"])
+    htf_zones = find_htf_zones(df)
+    matching_zones = [z for z in htf_zones if z[0] <= entry_price <= z[1]]
+    if matching_zones:
+        zone_types_uz = {
+            "bullish_fvg": "FVG", "bearish_fvg": "FVG",
+            "bullish_ob": "OB", "bearish_ob": "OB",
+        }
+        types_found = sorted(set(zone_types_uz.get(z[2], z[2]) for z in matching_zones))
+        htf_zone_info = f"\nℹ️ 1H {'/'.join(types_found)} zonasida"
 
     if signal["type"] == "jackpot_spring":
         emoji, label = "🎰🟢", f"{tf_tag} JACKPOT: Spring + Test (BULLISH)"
@@ -890,7 +982,7 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Voqea narxi: {signal['event_close']:.2f} → hozir: {signal['current_close']:.2f}"
         )
 
-    caption += trend_warning + session_warning
+    caption += trend_warning + session_warning + htf_warning + htf_zone_info
     send_telegram_document(chart_path, caption=caption)
 
     # Signal tarixga yoziladi - natijasi keyinroq (soatlik status'da) tekshiriladi
@@ -1022,7 +1114,7 @@ def main():
     interval = sys.argv[2] if len(sys.argv) > 2 else "5min"
 
     try:
-        candles_df = get_gold_candles(interval=interval, outputsize=160)
+        candles_df = get_gold_candles(interval=interval, outputsize=1500)
     except Exception as e:
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik ({interval}): {e}")
         sys.exit(1)
