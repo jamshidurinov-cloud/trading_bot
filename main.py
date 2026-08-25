@@ -269,21 +269,27 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
                 return level
         return None
 
+    diag = []
+
     # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
     bos_ref_idx = nearest_swing_high_before(cur)
     last_swing_high = highs[bos_ref_idx] if bos_ref_idx is not None else None
-    if last_swing_high is not None:
+    if last_swing_high is None:
+        diag.append("BULLISH: yaqin swing high topilmadi")
+    else:
         is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
-        if is_fresh_break:
-            # FVG qidiramiz (BOS svechasining o'zi ham FVG hosil qilgan bo'lishi mumkin,
-            # shuning uchun "cur"ni ham qamrab olamiz): lows[j] - highs[j-2] >= min_fvg_size
+        if not is_fresh_break:
+            diag.append(f"BULLISH: fresh_break yo'q (last_swing_high={last_swing_high:.2f}, "
+                        f"closes[cur]={closes[cur]:.2f}, closes[cur-1]={closes[cur-1]:.2f})")
+        else:
             fvg_idx = None
             for j in range(2, cur + 1):
                 if (lows[j] - highs[j - 2]) >= min_fvg_size:
                     fvg_idx = j
-            if fvg_idx is not None:
-                # Sweep qidiramiz (FVG'dan oldin): barcha mos nomzodlar orasidan
-                # ENG CHUQUR (eng past) sweep'ni tanlaymiz, birinchi topilganini emas
+            if fvg_idx is None:
+                diag.append(f"BULLISH: fresh_break BOR (BOS={last_swing_high:.2f}), lekin FVG topilmadi "
+                            f"(min_fvg_size={min_fvg_size:.3f})")
+            else:
                 best_sweep = None
                 for k in range(1, fvg_idx):
                     sl = prominent_low(k)
@@ -301,18 +307,28 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
                         "bos_level": last_swing_high,
                         "current_close": closes[cur],
                     }
+                diag.append(f"BULLISH: fresh_break BOR, FVG BOR, lekin sweep topilmadi "
+                            f"(min_sweep_depth={min_sweep_depth:.3f})")
 
     # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga (joriy svechada) ---
     bos_ref_idx2 = nearest_swing_low_before(cur)
     last_swing_low = lows[bos_ref_idx2] if bos_ref_idx2 is not None else None
-    if last_swing_low is not None:
+    if last_swing_low is None:
+        diag.append("BEARISH: yaqin swing low topilmadi")
+    else:
         is_fresh_break = closes[cur] < last_swing_low and closes[cur - 1] >= last_swing_low
-        if is_fresh_break:
+        if not is_fresh_break:
+            diag.append(f"BEARISH: fresh_break yo'q (last_swing_low={last_swing_low:.2f}, "
+                        f"closes[cur]={closes[cur]:.2f}, closes[cur-1]={closes[cur-1]:.2f})")
+        else:
             fvg_idx = None
             for j in range(2, cur + 1):
                 if (lows[j - 2] - highs[j]) >= min_fvg_size:
                     fvg_idx = j
-            if fvg_idx is not None:
+            if fvg_idx is None:
+                diag.append(f"BEARISH: fresh_break BOR (BOS={last_swing_low:.2f}), lekin FVG topilmadi "
+                            f"(min_fvg_size={min_fvg_size:.3f})")
+            else:
                 best_sweep = None
                 for k in range(1, fvg_idx):
                     sh = prominent_high(k)
@@ -330,7 +346,10 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
                         "bos_level": last_swing_low,
                         "current_close": closes[cur],
                     }
+                diag.append(f"BEARISH: fresh_break BOR, FVG BOR, lekin sweep topilmadi "
+                            f"(min_sweep_depth={min_sweep_depth:.3f})")
 
+    print("[SMC DEBUG] " + " | ".join(diag))
     return None
 
 
