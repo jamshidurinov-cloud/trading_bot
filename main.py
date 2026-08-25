@@ -601,11 +601,13 @@ def log_new_signal(signal, price_data, interval):
         risk = entry_price * 0.001  # nolga bo'linishdan himoya
 
     sign = 1 if direction == "bullish" else -1
+    now_utc = dt.datetime.now(dt.timezone.utc)
     log = load_signal_log()
     log.append({
-        "time": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "time": now_utc.isoformat(),
         "type": signal["type"],
         "interval": interval,
+        "session": "active" if is_active_session(now_utc) else "outside",
         "direction": direction,
         "entry_price": entry_price,
         "sl_level": sl_level,
@@ -786,6 +788,15 @@ def _build_stats(log, checked):
         subset = [e for e in checked if TYPE_GROUPS.get(e.get("type"), "boshqa") == grp]
         by_type[grp] = _stats_for_subset(subset)
 
+    # Sessiya bo'yicha (London/NY ichida vs tashqarisida) - session filtri
+    # haqiqatan foydali/farqli natija berayotganini tekshirish uchun. Eski
+    # (session maydonisiz) yozuvlar "noma'lum" guruhga tushadi, statistikani
+    # buzmaydi (alohida ko'rsatiladi, lekin filtrlanmaydi).
+    by_session = {}
+    for sess in sorted(set(e.get("session", "noma'lum") for e in checked)):
+        subset = [e for e in checked if e.get("session", "noma'lum") == sess]
+        by_session[sess] = _stats_for_subset(subset)
+
     # So'nggi ROLLING_WINDOW_HOURS soat ichida YOPILGAN signallar (umumiy statistika
     # o'chirilmaydi, bu faqat qo'shimcha, "hozir qanday ketyapti" ko'rsatkichi)
     now = dt.datetime.now(dt.timezone.utc)
@@ -809,6 +820,7 @@ def _build_stats(log, checked):
     overall["pending_breakdown"] = pending_breakdown
     overall["by_interval"] = by_interval
     overall["by_type"] = by_type
+    overall["by_session"] = by_session
     overall["recent"] = recent_stats
     return overall
 
@@ -1079,6 +1091,19 @@ def run_hourly_status(df, price_data, interval="5min"):
                         f"\n{label}: {s['total_checked']} ta — aniqlik: {s['win_rate']}%, "
                         f"{s['total_r']:+g}R (o'rt {s['avg_r']:+g}R)"
                     )
+
+                SESSION_LABELS = {"active": "🟢 Sessiya ichida", "outside": "🌙 Sessiyadan tashqari",
+                                   "noma'lum": "❔ Noma'lum (eski)"}
+                by_session = {k: v for k, v in stats["by_session"].items() if v["total_checked"] > 0}
+                if by_session:
+                    lines.append("\n🕐 Sessiya bo'yicha:")
+                    for sess, s in by_session.items():
+                        label = SESSION_LABELS.get(sess, sess)
+                        lines.append(
+                            f"\n{label}: {s['total_checked']} ta — aniqlik: {s['win_rate']}%, "
+                            f"{s['total_r']:+g}R (o'rt {s['avg_r']:+g}R)"
+                        )
+
                 r = stats["recent"]
                 if r["total_checked"] > 0:
                     lines.append(
