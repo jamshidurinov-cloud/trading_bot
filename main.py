@@ -1147,7 +1147,7 @@ def main():
     interval = sys.argv[2] if len(sys.argv) > 2 else "5min"
 
     try:
-        candles_df = get_gold_candles(interval=interval, outputsize=1500)
+        candles_df = get_gold_candles(interval=interval, outputsize=700)
     except Exception as e:
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik ({interval}): {e}")
         sys.exit(1)
