@@ -221,27 +221,40 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
 
     def prominent_high(idx):
         """idx'dan oldingi `prominence_window` ichidagi HAQIQIY swing cho'qqilar
-        orasidan eng yuqorisi (Sweep uchun). Oddiy oyna maksimumi emas — faqat
-        chinakam 'burilish qilgan' (bos_swing_window bilan tasdiqlangan) nuqtalar
-        hisobga olinadi, tasodifiy oraliq nuqta emas."""
+        orasidan, eng ekstremalidan boshlab, idx'gacha HECH KIM BUZMAGAN (undan
+        oshib ketmagan) birinchisini tanlaydi. Agar oraliq balandroq nuqta bilan
+        allaqachon "buzilgan" bo'lsa (ya'ni undan keyin narx yanada yuqoriga
+        chiqib ketgan bo'lsa), bu daraja endi 'muhim, sinalmagan' hisoblanmaydi
+        va rad etiladi."""
         start = max(0, idx - prominence_window)
         if idx - start < PROMINENCE_MIN_HISTORY:
             return None
         candidates = [i for i in swing_high_idx if start <= i < idx]
         if not candidates:
             return None
-        return max(highs[i] for i in candidates)
+        for i in sorted(candidates, key=lambda i: -highs[i]):
+            level = highs[i]
+            segment_max = highs[i + 1:idx].max() if i + 1 < idx else -float("inf")
+            if segment_max <= level:
+                return level
+        return None
 
     def prominent_low(idx):
         """idx'dan oldingi `prominence_window` ichidagi HAQIQIY swing tublar
-        orasidan eng pasti (Sweep uchun)."""
+        orasidan, eng ekstremalidan boshlab, idx'gacha HECH KIM BUZMAGAN
+        birinchisini tanlaydi (yuqoridagi mantiqning pastga versiyasi)."""
         start = max(0, idx - prominence_window)
         if idx - start < PROMINENCE_MIN_HISTORY:
             return None
         candidates = [i for i in swing_low_idx if start <= i < idx]
         if not candidates:
             return None
-        return min(lows[i] for i in candidates)
+        for i in sorted(candidates, key=lambda i: lows[i]):
+            level = lows[i]
+            segment_min = lows[i + 1:idx].min() if i + 1 < idx else float("inf")
+            if segment_min >= level:
+                return level
+        return None
 
     # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
     bos_ref_idx = nearest_swing_high_before(cur)
