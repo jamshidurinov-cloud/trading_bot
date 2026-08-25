@@ -379,18 +379,36 @@ def detect_ob_fvg_entry(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
     nearest_swing_low_before = lambda idx: next((i for i in reversed(swing_low_idx) if i < idx), None)
 
     def prominent_high(idx):
+        """idx'dan oldingi oynadagi HAQIQIY, hali BUZILMAGAN eng yuqori swing
+        cho'qqisi (eng ekstremalidan boshlab tekshiriladi)."""
         start = max(0, idx - prominence_window)
         if idx - start < prominence_min_history:
             return None
         candidates = [i for i in swing_high_idx if start <= i < idx]
-        return max(highs[i] for i in candidates) if candidates else None
+        if not candidates:
+            return None
+        for i in sorted(candidates, key=lambda i: -highs[i]):
+            level = highs[i]
+            segment_max = highs[i + 1:idx].max() if i + 1 < idx else -float("inf")
+            if segment_max <= level:
+                return level
+        return None
 
     def prominent_low(idx):
+        """idx'dan oldingi oynadagi HAQIQIY, hali BUZILMAGAN eng past swing
+        tubi (eng ekstremalidan boshlab tekshiriladi)."""
         start = max(0, idx - prominence_window)
         if idx - start < prominence_min_history:
             return None
         candidates = [i for i in swing_low_idx if start <= i < idx]
-        return min(lows[i] for i in candidates) if candidates else None
+        if not candidates:
+            return None
+        for i in sorted(candidates, key=lambda i: lows[i]):
+            level = lows[i]
+            segment_min = lows[i + 1:idx].min() if i + 1 < idx else float("inf")
+            if segment_min >= level:
+                return level
+        return None
 
     search_start = max(bos_swing_window, cur - retracement_window)
 
