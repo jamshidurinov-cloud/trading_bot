@@ -157,11 +157,24 @@ def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_T
 # ODDIY SPRING / UPTHRUST (moslashuvchan range, davomiylik bilan tasdiqlangan)
 # ============================================================================
 
+EVENT_SEARCH_WINDOW = 3  # "voqea" (event/test) uchun oxirgi nechta sveцhani tekshirish
+                         # (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli
+                         # bo'lish uchun)
+
+
 def detect_dynamic_spring_upthrust(df, swing_window=6, lookback=144,
-                                     tolerance_pct=RANGE_TOLERANCE_PCT, confirm_candles=CONFIRM_CANDLES):
-    """Moslashuvchan range'ga sweep qilib qaytgandan keyin, CONFIRM_CANDLES ta sveчa
-    davomida narx shu yo'nalishda davom etsa, signal beradi. Har voqea faqat bir
-    marta xabar qilinadi."""
+                                     tolerance_pct=RANGE_TOLERANCE_PCT, confirm_candles=CONFIRM_CANDLES,
+                                     event_search_window=EVENT_SEARCH_WINDOW):
+    """Moslashuvchan range'ga sweep qilib qaytgandan keyin, davomida narx shu
+    yo'nalishda davom etsa, signal beradi. Har voqea faqat bir marta xabar
+    qilinadi (dedup - main.py'dagi event_key orqali).
+
+    Voqea (event) joriy vaqtdan `confirm_candles` oldingi ANIQ bitta nuqtada
+    emas, balki so'nggi `event_search_window` sveцha ichidagi ISTALGAN nuqtada
+    bo'lishi mumkin — bu bitta o'tkazib yuborilgan tekshiruvga (masalan tarmoq
+    xatoligi tufayli) chidamli qiladi. Tasdiqlash — voqeadan joriy svechagacha
+    BARCHA oraliq svechalar davom etganini tekshiradi (aniq confirm_candles
+    sonida emas, balki qancha bo'lsa ham)."""
     range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
     if range_info is None:
         return None
@@ -172,44 +185,45 @@ def detect_dynamic_spring_upthrust(df, swing_window=6, lookback=144,
     closes = sub["close"].values
     times = sub.index
     n = len(sub)
+    cur = n - 1
 
     range_high = range_info["range_high"]
     range_low = range_info["range_low"]
 
-    event_idx = n - 1 - confirm_candles
-    if event_idx < swing_window:
+    earliest_event = max(swing_window, cur - confirm_candles - event_search_window + 1)
+    latest_event = cur - confirm_candles
+    if latest_event < earliest_event:
         return None
 
-    # SPRING: event_idx svechada past nuqta range_low'dan pastga tushib, yopilish qaytgan,
-    # so'ngra keyingi confirm_candles ta sveчa davomida narx pasaymagan (davom etgan)
-    if lows[event_idx] < range_low and closes[event_idx] > range_low:
-        entry_close = closes[event_idx]
-        confirmed = all(closes[event_idx + k] >= entry_close for k in range(1, confirm_candles + 1))
-        if confirmed and closes[-1] > entry_close:
-            return {
-                "type": "dynamic_spring",
-                "range_high": range_high,
-                "range_low": range_low,
-                "event_time": str(times[event_idx]),
-                "event_low": lows[event_idx],
-                "event_close": entry_close,
-                "current_close": closes[-1],
-            }
+    # SPRING: eng erta (eng ishonchli) voqeadan boshlab qidiramiz
+    for event_idx in range(earliest_event, latest_event + 1):
+        if lows[event_idx] < range_low and closes[event_idx] > range_low:
+            entry_close = closes[event_idx]
+            if all(closes[k] >= entry_close for k in range(event_idx + 1, cur + 1)) and closes[cur] > entry_close:
+                return {
+                    "type": "dynamic_spring",
+                    "range_high": range_high,
+                    "range_low": range_low,
+                    "event_time": str(times[event_idx]),
+                    "event_low": lows[event_idx],
+                    "event_close": entry_close,
+                    "current_close": closes[cur],
+                }
 
     # UPTHRUST: teskarisi
-    if highs[event_idx] > range_high and closes[event_idx] < range_high:
-        entry_close = closes[event_idx]
-        confirmed = all(closes[event_idx + k] <= entry_close for k in range(1, confirm_candles + 1))
-        if confirmed and closes[-1] < entry_close:
-            return {
-                "type": "dynamic_upthrust",
-                "range_high": range_high,
-                "range_low": range_low,
-                "event_time": str(times[event_idx]),
-                "event_high": highs[event_idx],
-                "event_close": entry_close,
-                "current_close": closes[-1],
-            }
+    for event_idx in range(earliest_event, latest_event + 1):
+        if highs[event_idx] > range_high and closes[event_idx] < range_high:
+            entry_close = closes[event_idx]
+            if all(closes[k] <= entry_close for k in range(event_idx + 1, cur + 1)) and closes[cur] < entry_close:
+                return {
+                    "type": "dynamic_upthrust",
+                    "range_high": range_high,
+                    "range_low": range_low,
+                    "event_time": str(times[event_idx]),
+                    "event_high": highs[event_idx],
+                    "event_close": entry_close,
+                    "current_close": closes[cur],
+                }
 
     return None
 
@@ -242,7 +256,7 @@ def check_pre_range_movement(sub, range_start_idx, range_height,
 
 def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT,
                             test_tolerance_pct=TEST_TOLERANCE_PCT, test_window=TEST_SEARCH_WINDOW,
-                            confirm_candles=CONFIRM_CANDLES):
+                            confirm_candles=CONFIRM_CANDLES, event_search_window=EVENT_SEARCH_WINDOW):
     """🎰 JACKPOT — eng yuqori ishonchli signal: klassik Wyckoff 'Spring + Test'
     (yoki 'Upthrust + Test') pattern'i:
 
@@ -254,7 +268,11 @@ def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_
     shuning uchun kamroq, lekin ancha ishonchliroq signal beradi.
 
     Qo'shimcha filtr: range paydo bo'lishidan oldin haqiqiy narx harakati bo'lgan
-    bo'lishi kerak (tekis, harakatsiz joydan chiqqan range'lar rad etiladi)."""
+    bo'lishi kerak (tekis, harakatsiz joydan chiqqan range'lar rad etiladi).
+
+    Test — joriy vaqtdan `confirm_candles` oldingi ANIQ bitta nuqtada emas, balki
+    so'nggi `event_search_window` sveцha ichidagi ISTALGAN nuqtada bo'lishi mumkin
+    (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli bo'lish uchun)."""
     range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
     if range_info is None:
         return None
@@ -265,6 +283,7 @@ def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_
     closes = sub["close"].values
     times = sub.index
     n = len(sub)
+    cur = n - 1
 
     range_high = range_info["range_high"]
     range_low = range_info["range_low"]
@@ -272,55 +291,66 @@ def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_
     if not check_pre_range_movement(sub, range_info["range_start_idx"], range_high - range_low):
         return None
 
-    test_idx = n - 1 - confirm_candles
-    if test_idx < swing_window:
+    earliest_test = max(swing_window, cur - confirm_candles - event_search_window + 1)
+    latest_test = cur - confirm_candles
+    if latest_test < earliest_test:
         return None
 
-    search_start = max(swing_window, test_idx - test_window)
-
     # --- SPRING + TEST (bullish) ---
-    if range_low > 0 and abs(lows[test_idx] - range_low) / range_low * 100 <= test_tolerance_pct \
-            and closes[test_idx] > range_low:
+    for test_idx in range(earliest_test, latest_test + 1):
+        if range_low <= 0:
+            break
+        if abs(lows[test_idx] - range_low) / range_low * 100 > test_tolerance_pct:
+            continue
+        if closes[test_idx] <= range_low:
+            continue
+        search_start = max(swing_window, test_idx - test_window)
         event_idx = None
         for k in range(search_start, test_idx):
             if lows[k] < range_low and closes[k] > range_low:
                 event_idx = k  # eng so'nggi (test'ga eng yaqin) sweep voqeasi
-        if event_idx is not None:
-            test_close = closes[test_idx]
-            confirmed = all(closes[test_idx + k] >= test_close for k in range(1, confirm_candles + 1))
-            if confirmed and closes[-1] > test_close:
-                return {
-                    "type": "jackpot_spring",
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "event_time": str(times[event_idx]),
-                    "event_low": lows[event_idx],
-                    "test_time": str(times[test_idx]),
-                    "test_low": lows[test_idx],
-                    "current_close": closes[-1],
-                }
+        if event_idx is None:
+            continue
+        test_close = closes[test_idx]
+        if all(closes[k] >= test_close for k in range(test_idx + 1, cur + 1)) and closes[cur] > test_close:
+            return {
+                "type": "jackpot_spring",
+                "range_high": range_high,
+                "range_low": range_low,
+                "event_time": str(times[event_idx]),
+                "event_low": lows[event_idx],
+                "test_time": str(times[test_idx]),
+                "test_low": lows[test_idx],
+                "current_close": closes[cur],
+            }
 
     # --- UPTHRUST + TEST (bearish) ---
-    if range_high > 0 and abs(highs[test_idx] - range_high) / range_high * 100 <= test_tolerance_pct \
-            and closes[test_idx] < range_high:
+    for test_idx in range(earliest_test, latest_test + 1):
+        if range_high <= 0:
+            break
+        if abs(highs[test_idx] - range_high) / range_high * 100 > test_tolerance_pct:
+            continue
+        if closes[test_idx] >= range_high:
+            continue
+        search_start = max(swing_window, test_idx - test_window)
         event_idx = None
         for k in range(search_start, test_idx):
             if highs[k] > range_high and closes[k] < range_high:
                 event_idx = k
-        if event_idx is not None:
-            test_close = closes[test_idx]
-            confirmed = all(closes[test_idx + k] <= test_close for k in range(1, confirm_candles + 1))
-            if confirmed and closes[-1] < test_close:
-                return {
-                    "type": "jackpot_upthrust",
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "event_time": str(times[event_idx]),
-                    "event_high": highs[event_idx],
-                    "test_time": str(times[test_idx]),
-                    "test_high": highs[test_idx],
-                    "current_close": closes[-1],
-                }
+        if event_idx is None:
+            continue
+        test_close = closes[test_idx]
+        if all(closes[k] <= test_close for k in range(test_idx + 1, cur + 1)) and closes[cur] < test_close:
+            return {
+                "type": "jackpot_upthrust",
+                "range_high": range_high,
+                "range_low": range_low,
+                "event_time": str(times[event_idx]),
+                "event_high": highs[event_idx],
+                "test_time": str(times[test_idx]),
+                "test_high": highs[test_idx],
+                "current_close": closes[cur],
+            }
 
     return None
 
@@ -348,11 +378,17 @@ def find_order_block(closes, opens, start_idx, direction):
 
 def detect_ob_fvg_entry(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
                           prominence_window=PROMINENCE_WINDOW, prominence_min_history=PROMINENCE_MIN_HISTORY,
-                          bos_swing_window=BOS_SWING_WINDOW, retracement_window=RETRACEMENT_WINDOW):
+                          bos_swing_window=BOS_SWING_WINDOW, retracement_window=RETRACEMENT_WINDOW,
+                          event_search_window=EVENT_SEARCH_WINDOW):
     """Liquidity Sweep + FVG + BOS ketma-ketligidan keyin, market narxda DARHOL
     kirmasdan — narx BOS hosil qilgan Order Block (OB) yoki Fair Value Gap (FVG)
     zonasiga QAYTIB kelishini kutadi. Bu ikkalasidan biriga (OB YOKI FVG) qaytish
     signal beradi, chunki bu SL'ni ancha torroq va R:R'ni yaxshiroq qiladi.
+
+    Zonaga birinchi tegish aynan JORIY svechada emas, balki so'nggi
+    `event_search_window` sveцha ichida bo'lgan bo'lishi mumkin (bitta
+    o'tkazib yuborilgan Cron ishga tushishiga chidamli bo'lish uchun) — faqat
+    shu oraliqda zona keyinchalik buzilmagan bo'lishi shart.
 
     Agar narx zonaga qaytmasdan ketaversa — signal chiqmaydi (imkoniyat qo'ldan
     ketadi, lekin bu — sifat evaziga miqdordan voz kechish).
@@ -450,11 +486,11 @@ def detect_ob_fvg_entry(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
                     if closes[k] < zone_bottom:
                         invalidated = True
                         break
-                    if lows[k] <= zone_top and highs[k] >= zone_bottom:
-                        first_touch = k
-                        break
+                    if first_touch is None and lows[k] <= zone_top and highs[k] >= zone_bottom:
+                        first_touch = k  # topilgach ham davom etamiz - keyingi invalidatsiyani ham tekshirish uchun
 
-                if not invalidated and first_touch == cur and closes[cur] > zone_bottom:
+                is_recent = first_touch is not None and (cur - first_touch) < event_search_window
+                if not invalidated and is_recent and closes[cur] > zone_bottom:
                     return {
                         "type": "ob_fvg_bullish",
                         "bos_time": str(times[bos_m]),
@@ -504,11 +540,11 @@ def detect_ob_fvg_entry(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
                     if closes[k] > zone_top:
                         invalidated = True
                         break
-                    if highs[k] >= zone_bottom and lows[k] <= zone_top:
+                    if first_touch is None and highs[k] >= zone_bottom and lows[k] <= zone_top:
                         first_touch = k
-                        break
 
-                if not invalidated and first_touch == cur and closes[cur] < zone_top:
+                is_recent = first_touch is not None and (cur - first_touch) < event_search_window
+                if not invalidated and is_recent and closes[cur] < zone_top:
                     return {
                         "type": "ob_fvg_bearish",
                         "bos_time": str(times[bos_m2]),
