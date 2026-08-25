@@ -91,9 +91,12 @@ def get_gold_price():
     }
 
 
-def get_gold_candles(interval="5min", outputsize=100):
-    """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi."""
+def get_gold_candles(interval="5min", outputsize=100, max_retries=2):
+    """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi. Tasodifiy tarmoq
+    sekinligi (timeout) tufayli butun ishga tushish behuda ketmasligi uchun,
+    xatolik bo'lsa bir necha marta qayta urinadi."""
     import pandas as pd
+    import time
 
     url = "https://api.twelvedata.com/time_series"
     params = {
@@ -103,12 +106,22 @@ def get_gold_candles(interval="5min", outputsize=100):
         "timezone": "UTC",
         "apikey": TWELVEDATA_API_KEY,
     }
-    resp = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
 
-    if "values" not in data:
-        raise RuntimeError(f"TwelveData time_series xatosi: {data.get('message', data)}")
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if "values" not in data:
+                raise RuntimeError(f"TwelveData time_series xatosi: {data.get('message', data)}")
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            raise last_error
 
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
