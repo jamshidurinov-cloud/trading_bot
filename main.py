@@ -193,9 +193,12 @@ from jackpot_signal import (
 PROMINENCE_WINDOW = 40   # Sweep uchun: "ajralib turgan" darajani aniqlash oynasi
 PROMINENCE_MIN_HISTORY = 10  # ishonchli referens uchun kamida shuncha oldingi sveчa kerak
 BOS_SWING_WINDOW = 6     # BOS uchun: eng yaqin tasdiqlangan swing nuqta oynasi
+FRESH_BREAK_WINDOW = 3   # "yangi sinish" uchun oxirgi nechta sveчani tekshirish
+                         # (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli
+                         # bo'lish uchun - masalan tarmoq/timeout xatoligi tufayli)
 
 
-def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
+def detect_smc_composite(df, lookback=144, min_fvg_mult=0.02, min_sweep_mult=0.15,
                           prominence_window=PROMINENCE_WINDOW, bos_swing_window=BOS_SWING_WINDOW):
     """ENG KUCHLI SMC/ICT signal: Liquidity Sweep + FVG + BOS/CHoCH ketma-ketligi.
     Faqat BOS/CHoCH aynan JORIY (oxirgi) svechada tasdiqlansa signal beradi —
@@ -271,14 +274,18 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
 
     diag = []
 
-    # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga (joriy svechada) ---
+    # --- BULLISH: sell-side sweep -> bullish FVG -> BOS yuqoriga ---
     bos_ref_idx = nearest_swing_high_before(cur)
     last_swing_high = highs[bos_ref_idx] if bos_ref_idx is not None else None
     if last_swing_high is None:
         diag.append("BULLISH: yaqin swing high topilmadi")
     else:
-        is_fresh_break = closes[cur] > last_swing_high and closes[cur - 1] <= last_swing_high
-        if not is_fresh_break:
+        break_idx = None
+        for m in range(max(1, cur - FRESH_BREAK_WINDOW + 1), cur + 1):
+            if closes[m] > last_swing_high and closes[m - 1] <= last_swing_high:
+                break_idx = m
+                break  # eng ERTAROQ (haqiqiy) sinish momentini olamiz
+        if break_idx is None:
             diag.append(f"BULLISH: fresh_break yo'q (last_swing_high={last_swing_high:.2f}, "
                         f"closes[cur]={closes[cur]:.2f}, closes[cur-1]={closes[cur-1]:.2f})")
         else:
@@ -304,20 +311,25 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
                         "sweep_time": str(times[best_sweep["idx"]]),
                         "sweep_level": best_sweep["sl"],
                         "fvg_time": str(times[fvg_idx]),
+                        "bos_time": str(times[break_idx]),
                         "bos_level": last_swing_high,
                         "current_close": closes[cur],
                     }
                 diag.append(f"BULLISH: fresh_break BOR, FVG BOR, lekin sweep topilmadi "
                             f"(min_sweep_depth={min_sweep_depth:.3f})")
 
-    # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga (joriy svechada) ---
+    # --- BEARISH: buy-side sweep -> bearish FVG -> BOS pastga ---
     bos_ref_idx2 = nearest_swing_low_before(cur)
     last_swing_low = lows[bos_ref_idx2] if bos_ref_idx2 is not None else None
     if last_swing_low is None:
         diag.append("BEARISH: yaqin swing low topilmadi")
     else:
-        is_fresh_break = closes[cur] < last_swing_low and closes[cur - 1] >= last_swing_low
-        if not is_fresh_break:
+        break_idx2 = None
+        for m in range(max(1, cur - FRESH_BREAK_WINDOW + 1), cur + 1):
+            if closes[m] < last_swing_low and closes[m - 1] >= last_swing_low:
+                break_idx2 = m
+                break
+        if break_idx2 is None:
             diag.append(f"BEARISH: fresh_break yo'q (last_swing_low={last_swing_low:.2f}, "
                         f"closes[cur]={closes[cur]:.2f}, closes[cur-1]={closes[cur-1]:.2f})")
         else:
@@ -342,6 +354,7 @@ def detect_smc_composite(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15
                         "type": "smc_bearish",
                         "sweep_time": str(times[best_sweep["idx"]]),
                         "sweep_level": best_sweep["sh"],
+                        "bos_time": str(times[break_idx2]),
                         "fvg_time": str(times[fvg_idx]),
                         "bos_level": last_swing_low,
                         "current_close": closes[cur],
@@ -631,6 +644,34 @@ def compute_sl_level(signal):
     return signal["zone_top"] + SL_BUFFER  # ob_fvg_bearish
 
 
+def get_signal_event_key(signal):
+    """Signalning 'o'ziga xos voqea vaqti'ni qaytaradi - bu bir xil voqea
+    (masalan bir xil BOS) qayta-qayta xabar qilinmasligi uchun solishtirish
+    kaliti sifatida ishlatiladi."""
+    for field in ("bos_time", "test_time", "event_time"):
+        if field in signal and signal[field] is not None:
+            return signal[field]
+    return None
+
+
+def is_duplicate_signal(signal, interval):
+    """Gist'dagi so'nggi yozuvlar orasida, xuddi shu turdagi va xuddi shu voqea
+    vaqtiga ega signal allaqachon yuborilganmi tekshiradi. FRESH_BREAK_WINDOW
+    kengaytirilgani uchun (bir necha svecha), bir xil voqea ketma-ket bir
+    nechta ishga tushishda aniqlanishi mumkin - bu funksiya takrorni oldini oladi."""
+    if not tracking_enabled():
+        return False
+    key = get_signal_event_key(signal)
+    if key is None:
+        return False
+    log = load_signal_log()
+    for e in log:
+        if e.get("type") == signal["type"] and e.get("interval") == interval \
+                and e.get("event_key") == key:
+            return True
+    return False
+
+
 def log_new_signal(signal, price_data, interval):
     """Yangi chiqqan signalni SL/TP darajalari bilan tarixga qo'shadi
     (natijasi keyinroq svecha-svecha tekshiriladi)."""
@@ -653,6 +694,7 @@ def log_new_signal(signal, price_data, interval):
         "type": signal["type"],
         "interval": interval,
         "session": "active" if is_active_session(now_utc) else "outside",
+        "event_key": get_signal_event_key(signal),
         "direction": direction,
         "entry_price": entry_price,
         "sl_level": sl_level,
@@ -944,6 +986,11 @@ def run_signal_check(df, price_data, interval="5min"):
         else:
             print(f"[{interval}] Signal yo'q. Range topilmadi (teng cho'qqi/tub yo'q), "
                   f"joriy narx: {last_close:.2f}")
+        return
+
+    if is_duplicate_signal(signal, interval):
+        print(f"[{interval}] Signal topildi ({signal['type']}), lekin bu voqea "
+              f"allaqachon xabar qilingan (event_key={get_signal_event_key(signal)}) — takrorlanmaydi.")
         return
 
     chart_path = make_chart_image(df.tail(150), interval=interval)
