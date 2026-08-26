@@ -641,9 +641,9 @@ def compute_sl_level(signal):
     if signal["type"] == "jackpot_upthrust":
         return signal["event_high"] + SL_BUFFER
     if signal["type"] == "smc_official_bullish":
-        return signal["level"] - SL_BUFFER
+        return signal["sweep_level"] - SL_BUFFER
     if signal["type"] == "smc_official_bearish":
-        return signal["level"] + SL_BUFFER
+        return signal["sweep_level"] + SL_BUFFER
     if signal["type"] == "ob_fvg_bullish":
         return signal["zone_bottom"] - SL_BUFFER
     return signal["zone_top"] + SL_BUFFER  # ob_fvg_bearish
@@ -653,7 +653,7 @@ def get_signal_event_key(signal):
     """Signalning 'o'ziga xos voqea vaqti'ni qaytaradi - bu bir xil voqea
     (masalan bir xil BOS) qayta-qayta xabar qilinmasligi uchun solishtirish
     kaliti sifatida ishlatiladi."""
-    for field in ("bos_time", "test_time", "event_time", "broken_time"):
+    for field in ("bos_time", "test_time", "event_time", "broken_time", "fvg_time", "sweep_time"):
         if field in signal and signal[field] is not None:
             return signal[field]
     return None
@@ -1052,26 +1052,22 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Hozir: {signal['current_close']:.2f}"
         )
     elif signal["type"] == "smc_official_bullish":
-        kind_uz = "BOS (trend davomiyligi)" if signal["kind"] == "BOS" else "CHoCH (teskari burilish)"
-        emoji, label = "🔥🟢", f"{tf_tag} SMC: {kind_uz} (BULLISH)"
-        fvg_line = f"\nFVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}" if signal.get("fvg_time") else ""
+        structure_note = f" + {signal['structure_kind']}" if signal["has_structure"] else ""
+        emoji, label = "🔥🟢", f"{tf_tag} SMC: Sweep + FVG{structure_note} (BULLISH)"
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Struktura darajasi: {signal['level']:.2f}\n"
-            f"Sinish vaqti: {signal['broken_time']}"
-            f"{fvg_line}"
+            f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
+            f"FVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}"
         )
     elif signal["type"] == "smc_official_bearish":
-        kind_uz = "BOS (trend davomiyligi)" if signal["kind"] == "BOS" else "CHoCH (teskari burilish)"
-        emoji, label = "🔥🔴", f"{tf_tag} SMC: {kind_uz} (BEARISH)"
-        fvg_line = f"\nFVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}" if signal.get("fvg_time") else ""
+        structure_note = f" + {signal['structure_kind']}" if signal["has_structure"] else ""
+        emoji, label = "🔥🔴", f"{tf_tag} SMC: Sweep + FVG{structure_note} (BEARISH)"
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Struktura darajasi: {signal['level']:.2f}\n"
-            f"Sinish vaqti: {signal['broken_time']}"
-            f"{fvg_line}"
+            f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
+            f"FVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}"
         )
     elif signal["type"] == "ob_fvg_bullish":
         emoji, label = "🎯🟢", f"{tf_tag} OB/FVG ENTRY (BULLISH) — retracement tasdiqlandi"
