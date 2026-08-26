@@ -324,72 +324,199 @@ class smc:
 
         return pd.concat([bos, choch, level, broken], axis=1)
 
+    @classmethod
+    def liquidity(cls, ohlc: DataFrame, swing_highs_lows: DataFrame, range_percent: float = 0.01) -> Series:
+        """Liquidity - bir-biriga yaqin (teng) cho'qqilar yoki tublar to'plami.
+        Liquidity = 1 agar teng cho'qqilar (keyin pastga sweep bo'lsa bearish setup),
+        Liquidity = -1 agar teng tublar (keyin yuqoriga sweep bo'lsa bullish setup).
+        Swept = shu likvidlikni "tozalagan" (sweep qilgan) svecha indeksi."""
+        shl = swing_highs_lows.copy()
+        n = len(ohlc)
+        pip_range = (ohlc["high"].max() - ohlc["low"].min()) * range_percent
+        ohlc_high = ohlc["high"].values
+        ohlc_low = ohlc["low"].values
+        shl_HL = shl["HighLow"].values.copy()
+        shl_Level = shl["Level"].values.copy()
 
-def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_window=3, min_fvg_mult=0.1):
-    """smartmoneyconcepts kutubxonasi (LuxAlgo portlangan) asosida BOS/CHoCH + FVG
-    signalini aniqlaydi. Kutubxonaning o'zi BOS (trend davomiyligi) va CHoCH
-    (teskari burilish)ni aniq, pattern-matching orqali ajratadi."""
+        liquidity = np.full(n, np.nan, dtype=np.float32)
+        liquidity_level = np.full(n, np.nan, dtype=np.float32)
+        liquidity_end = np.full(n, np.nan, dtype=np.float32)
+        liquidity_swept = np.full(n, np.nan, dtype=np.float32)
+
+        bull_indices = np.nonzero(shl_HL == 1)[0]
+        for i in bull_indices:
+            if shl_HL[i] != 1:
+                continue
+            high_level = shl_Level[i]
+            range_low = high_level - pip_range
+            range_high = high_level + pip_range
+            group_levels = [high_level]
+            group_end = i
+            c_start = i + 1
+            if c_start < n:
+                cond = ohlc_high[c_start:] >= range_high
+                swept = c_start + int(np.argmax(cond)) if np.any(cond) else 0
+            else:
+                swept = 0
+            for j in bull_indices:
+                if j <= i:
+                    continue
+                if swept and j >= swept:
+                    break
+                if shl_HL[j] == 1 and (range_low <= shl_Level[j] <= range_high):
+                    group_levels.append(shl_Level[j])
+                    group_end = j
+                    shl_HL[j] = 0
+            if len(group_levels) > 1:
+                avg_level = sum(group_levels) / len(group_levels)
+                liquidity[i] = 1
+                liquidity_level[i] = avg_level
+                liquidity_end[i] = group_end
+                liquidity_swept[i] = swept
+
+        bear_indices = np.nonzero(shl_HL == -1)[0]
+        for i in bear_indices:
+            if shl_HL[i] != -1:
+                continue
+            low_level = shl_Level[i]
+            range_low = low_level - pip_range
+            range_high = low_level + pip_range
+            group_levels = [low_level]
+            group_end = i
+            c_start = i + 1
+            if c_start < n:
+                cond = ohlc_low[c_start:] <= range_low
+                swept = c_start + int(np.argmax(cond)) if np.any(cond) else 0
+            else:
+                swept = 0
+            for j in bear_indices:
+                if j <= i:
+                    continue
+                if swept and j >= swept:
+                    break
+                if shl_HL[j] == -1 and (range_low <= shl_Level[j] <= range_high):
+                    group_levels.append(shl_Level[j])
+                    group_end = j
+                    shl_HL[j] = 0
+            if len(group_levels) > 1:
+                avg_level = sum(group_levels) / len(group_levels)
+                liquidity[i] = -1
+                liquidity_level[i] = avg_level
+                liquidity_end[i] = group_end
+                liquidity_swept[i] = swept
+
+        return pd.concat(
+            [
+                pd.Series(liquidity, name="Liquidity"),
+                pd.Series(liquidity_level, name="Level"),
+                pd.Series(liquidity_end, name="End"),
+                pd.Series(liquidity_swept, name="Swept"),
+            ],
+            axis=1,
+        )
+
+
+def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_window=5,
+                                 min_fvg_mult=0.1, range_percent=0.01):
+    """smartmoneyconcepts kutubxonasi (LuxAlgo'dan portlangan) asosida signal aniqlaydi.
+
+    MAJBURIY komponentlar (ikkalasi ham bo'lishi shart):
+    1. Sweep (Liquidity) — teng cho'qqi/tub to'plami "tozalangan" (sweep qilingan)
+    2. FVG — sweep'dan keyin hosil bo'lgan Fair Value Gap
+
+    QO'SHIMCHA (bo'lsa ham, bo'lmasa ham signal chiqadi, lekin bo'lsa "kuchliroq"
+    deb belgilanadi):
+    3. BOS/CHoCH — struktura sinishi (kutubxonaning aniq pattern-matching orqali
+       BOS/CHoCH farqini ajratuvchi funksiyasi)
+    """
     sub = df.iloc[-lookback:].copy()
     if len(sub) < lookback:
         return None
-
-    swings = smc.swing_highs_lows(sub, swing_length=swing_length)
-    bc = smc.bos_choch(sub, swings, close_break=True)
-    fvg_df = smc.fvg(sub, join_consecutive=False)
 
     n = len(sub)
     cur = n - 1
     times = sub.index
 
-    broken_mask = bc["BrokenIndex"].notna()
-    if not broken_mask.any():
-        return None
-
-    candidates = bc[broken_mask]
-    recent = candidates[
-        (candidates["BrokenIndex"] >= cur - fresh_break_window + 1)
-        & (candidates["BrokenIndex"] <= cur)
-    ]
-    if recent.empty:
-        return None
-
-    recent_sorted = recent.sort_values("BrokenIndex")
-    row = recent_sorted.iloc[-1]
-    structure_idx = recent_sorted.index[-1]
-
-    is_bos = not pd.isna(row["BOS"])
-    direction = "bullish" if (row["BOS"] == 1 or row["CHOCH"] == 1) else "bearish"
-    kind = "BOS" if is_bos else "CHOCH"
-    level = row["Level"]
-    broken_idx = int(row["BrokenIndex"])
+    swings = smc.swing_highs_lows(sub, swing_length=swing_length)
+    liq = smc.liquidity(sub, swings, range_percent=range_percent)
+    fvg_df = smc.fvg(sub, join_consecutive=False)
+    bc = smc.bos_choch(sub, swings, close_break=True)
 
     avg_range = (sub["high"] - sub["low"]).mean()
+    if avg_range == 0:
+        return None
     min_fvg_size = avg_range * min_fvg_mult
-    fvg_direction = 1 if direction == "bullish" else -1
-    fvg_candidates = fvg_df[
-        (fvg_df["FVG"] == fvg_direction)
-        & ((fvg_df["Top"] - fvg_df["Bottom"]).abs() >= min_fvg_size)
-    ]
-    relevant_fvg = fvg_candidates[
-        (fvg_candidates.index >= structure_idx) & (fvg_candidates.index <= broken_idx + 2)
-    ]
 
-    fvg_time = fvg_top = fvg_bottom = None
-    if not relevant_fvg.empty:
-        fvg_row = relevant_fvg.iloc[-1]
-        fvg_idx = relevant_fvg.index[-1]
-        fvg_time = str(times[fvg_idx])
-        fvg_top = float(fvg_row["Top"])
-        fvg_bottom = float(fvg_row["Bottom"])
+    def find_signal(direction):
+        # bullish uchun: Liquidity==-1 (teng tublar) sweep qilingan -> keyin bullish FVG
+        # bearish uchun: Liquidity==1 (teng cho'qqilar) sweep qilingan -> keyin bearish FVG
+        liq_type = -1 if direction == "bullish" else 1
+        fvg_type = 1 if direction == "bullish" else -1
 
-    return {
-        "type": f"smc_official_{direction}",
-        "kind": kind,
-        "structure_time": str(times[structure_idx]),
-        "level": float(level),
-        "broken_time": str(times[broken_idx]),
-        "fvg_time": fvg_time,
-        "fvg_top": fvg_top,
-        "fvg_bottom": fvg_bottom,
-        "current_close": float(sub["close"].iloc[cur]),
-    }
+        candidates = liq[(liq["Liquidity"] == liq_type) & liq["Swept"].notna() & (liq["Swept"] > 0)]
+        if candidates.empty:
+            return None
+
+        best = None
+        for sweep_idx, row in candidates.iterrows():
+            swept_idx = int(row["Swept"])
+            fvg_candidates = fvg_df[
+                (fvg_df["FVG"] == fvg_type)
+                & (fvg_df.index > swept_idx)
+                & ((fvg_df["Top"] - fvg_df["Bottom"]).abs() >= min_fvg_size)
+            ]
+            if fvg_candidates.empty:
+                continue
+            fvg_idx = fvg_candidates.index[-1]  # eng so'nggi mos FVG
+
+            # "yangilik" tekshiruvi: FVG (yoki undan keyingi tasdiqlash) joriy vaqtga yaqin bo'lishi kerak
+            if fvg_idx < cur - fresh_break_window + 1:
+                continue
+
+            if best is None or fvg_idx > best["_fvg_idx"]:
+                fvg_row = fvg_candidates.loc[fvg_idx]
+                best = {
+                    "sweep_idx": swept_idx,
+                    "sweep_level": float(row["Level"]),
+                    "fvg_idx": fvg_idx,
+                    "fvg_top": float(fvg_row["Top"]),
+                    "fvg_bottom": float(fvg_row["Bottom"]),
+                    "_fvg_idx": fvg_idx,
+                }
+
+        if best is None:
+            return None
+
+        # BOS/CHoCH - QO'SHIMCHA (majburiy emas): shu sweep va joriy vaqt oralig'ida bormi tekshiramiz
+        has_structure = False
+        structure_kind = None
+        bc_matches = bc[(bc["BOS"].notna()) | (bc["CHOCH"].notna())]
+        for bidx, brow in bc_matches.iterrows():
+            broken_idx = brow["BrokenIndex"]
+            if pd.isna(broken_idx):
+                continue
+            val = brow["BOS"] if not pd.isna(brow["BOS"]) else brow["CHOCH"]
+            expected = 1 if direction == "bullish" else -1
+            if val == expected and best["sweep_idx"] <= bidx <= cur and broken_idx <= cur:
+                has_structure = True
+                structure_kind = "BOS" if not pd.isna(brow["BOS"]) else "CHOCH"
+
+        return {
+            "type": f"smc_official_{direction}",
+            "sweep_time": str(times[best["sweep_idx"]]),
+            "sweep_level": best["sweep_level"],
+            "fvg_time": str(times[best["fvg_idx"]]),
+            "fvg_top": best["fvg_top"],
+            "fvg_bottom": best["fvg_bottom"],
+            "has_structure": has_structure,
+            "structure_kind": structure_kind,
+            "current_close": float(sub["close"].iloc[cur]),
+        }
+
+    bullish_signal = find_signal("bullish")
+    bearish_signal = find_signal("bearish")
+
+    # Ikkalasi ham topilsa (kamdan-kam), FVG yangiroq bo'lganini tanlaymiz
+    if bullish_signal and bearish_signal:
+        return bullish_signal if bullish_signal["fvg_time"] >= bearish_signal["fvg_time"] else bearish_signal
+    return bullish_signal or bearish_signal
