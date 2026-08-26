@@ -188,6 +188,7 @@ from jackpot_signal import (
     find_swing_points, cluster_equal_levels, detect_dynamic_range,
     detect_dynamic_spring_upthrust, detect_jackpot_signal, detect_ob_fvg_entry,
 )
+from smc_lib import detect_smc_official_signal
 
 
 PROMINENCE_WINDOW = 40   # Sweep uchun: "ajralib turgan" darajani aniqlash oynasi
@@ -639,6 +640,10 @@ def compute_sl_level(signal):
         return signal["event_low"] - SL_BUFFER
     if signal["type"] == "jackpot_upthrust":
         return signal["event_high"] + SL_BUFFER
+    if signal["type"] == "smc_official_bullish":
+        return signal["level"] - SL_BUFFER
+    if signal["type"] == "smc_official_bearish":
+        return signal["level"] + SL_BUFFER
     if signal["type"] == "ob_fvg_bullish":
         return signal["zone_bottom"] - SL_BUFFER
     return signal["zone_top"] + SL_BUFFER  # ob_fvg_bearish
@@ -648,7 +653,7 @@ def get_signal_event_key(signal):
     """Signalning 'o'ziga xos voqea vaqti'ni qaytaradi - bu bir xil voqea
     (masalan bir xil BOS) qayta-qayta xabar qilinmasligi uchun solishtirish
     kaliti sifatida ishlatiladi."""
-    for field in ("bos_time", "test_time", "event_time"):
+    for field in ("bos_time", "test_time", "event_time", "broken_time"):
         if field in signal and signal[field] is not None:
             return signal[field]
     return None
@@ -679,7 +684,7 @@ def log_new_signal(signal, price_data, interval):
         return
     import datetime as dt
 
-    direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
+    direction = "bullish" if signal["type"] in ("smc_bullish", "smc_official_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
     entry_price = float(price_data["price"])
     sl_level = float(compute_sl_level(signal))
     risk = abs(entry_price - sl_level)
@@ -868,6 +873,7 @@ def _build_stats(log, checked):
         "jackpot_spring": "jackpot", "jackpot_upthrust": "jackpot",
         "ob_fvg_bullish": "ob_fvg", "ob_fvg_bearish": "ob_fvg",
         "smc_bullish": "smc", "smc_bearish": "smc",
+        "smc_official_bullish": "smc", "smc_official_bearish": "smc",
         "dynamic_spring": "dynamic", "dynamic_upthrust": "dynamic",
     }
     by_type = {}
@@ -970,7 +976,9 @@ def run_signal_check(df, price_data, interval="5min"):
     # Eng kuchli signal birinchi tekshiriladi — agar u chiqsa, boshqalar tekshirilmaydi
     jackpot = detect_jackpot_signal(df, lookback=144)
     ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=144)
-    smc = None if (jackpot or ob_fvg) else detect_smc_composite(df, lookback=144)
+    # 🔥 SMC signal endi 'smartmoneyconcepts' (LuxAlgo'dan portlangan, sinalgan)
+    # kutubxonasi asosida - BOS va CHoCH'ni aniq, pattern-matching orqali ajratadi
+    smc = None if (jackpot or ob_fvg) else detect_smc_official_signal(df, lookback=144)
     dynamic = None if (jackpot or ob_fvg or smc) else detect_dynamic_spring_upthrust(df, lookback=144)
     signal = jackpot or ob_fvg or smc or dynamic
 
@@ -997,7 +1005,7 @@ def run_signal_check(df, price_data, interval="5min"):
 
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
-    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
+    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "smc_official_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
     trend_warning = ""
     if bias != "neutral" and bias != signal_direction:
         bias_uz = "yuqoriga" if bias == "bullish" else "pastga"
@@ -1043,21 +1051,27 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Sweep: {signal['event_high']:.2f}  |  Test: {signal['test_high']:.2f}\n"
             f"Hozir: {signal['current_close']:.2f}"
         )
-    elif signal["type"] == "smc_bullish":
-        emoji, label = "🔥🟢", f"{tf_tag} KUCHLI SIGNAL: Liquidity Sweep + FVG + BOS (BULLISH)"
+    elif signal["type"] == "smc_official_bullish":
+        kind_uz = "BOS (trend davomiyligi)" if signal["kind"] == "BOS" else "CHoCH (teskari burilish)"
+        emoji, label = "🔥🟢", f"{tf_tag} SMC: {kind_uz} (BULLISH)"
+        fvg_line = f"\nFVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}" if signal.get("fvg_time") else ""
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
-            f"BOS darajasi: {signal['bos_level']:.2f} (yopilish: {signal['current_close']:.2f})"
+            f"Struktura darajasi: {signal['level']:.2f}\n"
+            f"Sinish vaqti: {signal['broken_time']}"
+            f"{fvg_line}"
         )
-    elif signal["type"] == "smc_bearish":
-        emoji, label = "🔥🔴", f"{tf_tag} KUCHLI SIGNAL: Liquidity Sweep + FVG + BOS (BEARISH)"
+    elif signal["type"] == "smc_official_bearish":
+        kind_uz = "BOS (trend davomiyligi)" if signal["kind"] == "BOS" else "CHoCH (teskari burilish)"
+        emoji, label = "🔥🔴", f"{tf_tag} SMC: {kind_uz} (BEARISH)"
+        fvg_line = f"\nFVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}" if signal.get("fvg_time") else ""
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
-            f"BOS darajasi: {signal['bos_level']:.2f} (yopilish: {signal['current_close']:.2f})"
+            f"Struktura darajasi: {signal['level']:.2f}\n"
+            f"Sinish vaqti: {signal['broken_time']}"
+            f"{fvg_line}"
         )
     elif signal["type"] == "ob_fvg_bullish":
         emoji, label = "🎯🟢", f"{tf_tag} OB/FVG ENTRY (BULLISH) — retracement tasdiqlandi"
