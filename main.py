@@ -91,10 +91,11 @@ def get_gold_price():
     }
 
 
-def get_gold_candles(interval="5min", outputsize=100, max_retries=2):
+def get_gold_candles(interval="5min", outputsize=100, max_retries=3):
     """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi. Tasodifiy tarmoq
     sekinligi (timeout) tufayli butun ishga tushish behuda ketmasligi uchun,
-    xatolik bo'lsa bir necha marta qayta urinadi."""
+    xatolik bo'lsa bir necha marta qayta urinadi (har safar biroz uzunroq
+    kutish vaqti bilan)."""
     import pandas as pd
     import time
 
@@ -110,7 +111,7 @@ def get_gold_candles(interval="5min", outputsize=100, max_retries=2):
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.get(url, params=params, timeout=30)
+            resp = requests.get(url, params=params, timeout=30 + attempt * 10)
             resp.raise_for_status()
             data = resp.json()
             if "values" not in data:
@@ -119,7 +120,7 @@ def get_gold_candles(interval="5min", outputsize=100, max_retries=2):
         except Exception as e:
             last_error = e
             if attempt < max_retries:
-                time.sleep(2)
+                time.sleep(2 + attempt * 2)
                 continue
             raise last_error
 
@@ -385,7 +386,7 @@ def get_trend_bias(df, period=144, threshold_pct=0.05):
     return "neutral"
 
 
-def get_htf_bias(df, htf="1h", period=50, threshold_pct=0.05):
+def get_htf_bias(df, htf="1h", period=30, threshold_pct=0.05):
     """CHINAKAM kattaroq timeframe (masalan 1 soatlik) trend yo'nalishini aniqlaydi.
     Qo'shimcha API so'rovisiz — mavjud (5m yoki 1m) ma'lumotni 1H svechalarga
     'yig'ib chiqaradi' (resample), so'ng shu asosda SMA solishtiradi.
@@ -1249,7 +1250,7 @@ def main():
     interval = sys.argv[2] if len(sys.argv) > 2 else "5min"
 
     try:
-        candles_df = get_gold_candles(interval=interval, outputsize=700)
+        candles_df = get_gold_candles(interval=interval, outputsize=450)
     except Exception as e:
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik ({interval}): {e}")
         sys.exit(1)
