@@ -455,9 +455,10 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
 
         candidates = liq[(liq["Liquidity"] == liq_type) & liq["Swept"].notna() & (liq["Swept"] > 0)]
         if candidates.empty:
-            return None
+            return None, f"{direction}: hech qanday sweep qilingan likvidlik (teng cho'qqi/tub) topilmadi"
 
         best = None
+        rejected_reasons = []
         for sweep_idx, row in candidates.iterrows():
             swept_idx = int(row["Swept"])
             fvg_candidates = fvg_df[
@@ -466,11 +467,18 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
                 & ((fvg_df["Top"] - fvg_df["Bottom"]).abs() >= min_fvg_size)
             ]
             if fvg_candidates.empty:
+                rejected_reasons.append(
+                    f"sweep@{swept_idx}(lvl={row['Level']:.2f}) - keyin mos FVG topilmadi"
+                )
                 continue
             fvg_idx = fvg_candidates.index[-1]  # eng so'nggi mos FVG
 
             # "yangilik" tekshiruvi: FVG (yoki undan keyingi tasdiqlash) joriy vaqtga yaqin bo'lishi kerak
             if fvg_idx < cur - fresh_break_window + 1:
+                rejected_reasons.append(
+                    f"sweep@{swept_idx} + FVG@{fvg_idx} topildi, lekin ESKI "
+                    f"(cur={cur}, fresh_break_window={fresh_break_window})"
+                )
                 continue
 
             if best is None or fvg_idx > best["_fvg_idx"]:
@@ -485,7 +493,9 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
                 }
 
         if best is None:
-            return None
+            reason = f"{direction}: {len(candidates)} ta sweep topildi, lekin hech biri fresh FVG bilan mos kelmadi. " \
+                     + " | ".join(rejected_reasons[-3:])
+            return None, reason
 
         # BOS/CHoCH - QO'SHIMCHA (majburiy emas): shu sweep va joriy vaqt oralig'ida bormi tekshiramiz
         has_structure = False
@@ -511,10 +521,13 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
             "has_structure": has_structure,
             "structure_kind": structure_kind,
             "current_close": float(sub["close"].iloc[cur]),
-        }
+        }, None
 
-    bullish_signal = find_signal("bullish")
-    bearish_signal = find_signal("bearish")
+    bullish_signal, bull_reason = find_signal("bullish")
+    bearish_signal, bear_reason = find_signal("bearish")
+
+    if bullish_signal is None and bearish_signal is None:
+        print(f"[SMC_OFFICIAL DEBUG] {bull_reason} || {bear_reason}")
 
     # Ikkalasi ham topilsa (kamdan-kam), FVG yangiroq bo'lganini tanlaymiz
     if bullish_signal and bearish_signal:
