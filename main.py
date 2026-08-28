@@ -20,6 +20,7 @@ import requests
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC")  # ntfy.sh orqali tezkor push-bildirishnoma (ixtiyoriy)
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")      # signal tracking uchun (Gist)
 GIST_ID = os.environ.get("GIST_ID")                # signal tracking uchun (Gist)
 
@@ -976,6 +977,27 @@ def send_telegram_document(file_path, caption=""):
     resp.raise_for_status()
 
 
+def send_ntfy_alert(title, message, priority="high"):
+    """ntfy.sh orqali tezkor push-bildirishnoma yuboradi (Telegram'ga QO'SHIMCHA,
+    uni almashtirmaydi). Telefon qulflangan/uxlab yotgan holatda ham darhol
+    yetib borishi uchun. NTFY_TOPIC sozlanmagan bo'lsa, jim o'tkazib yuboriladi."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode("utf-8"),
+            headers={
+                "Title": title.encode("utf-8"),
+                "Priority": priority,
+                "Tags": "rotating_light",
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"ntfy.sh xabar yuborishda xatolik: {e}")
+
+
 # ============================================================================
 # REJIM 1: SIGNAL TEKSHIRUV (har 5 daqiqada)
 # ============================================================================
@@ -1128,6 +1150,7 @@ def run_signal_check(df, price_data, interval="5min"):
 
     caption += trend_warning + session_warning + htf_warning + htf_zone_info
     send_telegram_document(chart_path, caption=caption)
+    send_ntfy_alert(title=f"🚨 {tf_tag} {emoji} Yangi signal!", message=caption[:400])
 
     # Signal tarixga yoziladi - natijasi keyinroq (soatlik status'da) tekshiriladi
     log_new_signal(signal, price_data, interval)
