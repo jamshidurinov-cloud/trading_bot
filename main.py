@@ -600,6 +600,10 @@ def load_signal_log():
         return json.loads(content)
     except Exception as e:
         print(f"Signal logni o'qishda xatolik: {e}")
+        try:
+            send_telegram_message(f"⚠️ Signal logni O'QISHDA xatolik (tarix yo'qolishi mumkin!): {e}")
+        except Exception:
+            pass
         return []
 
 
@@ -618,6 +622,10 @@ def save_signal_log(log):
         resp.raise_for_status()
     except Exception as e:
         print(f"Signal logni saqlashda xatolik: {e}")
+        try:
+            send_telegram_message(f"⚠️ Signal logni SAQLASHDA xatolik (tracking ishlamadi): {e}")
+        except Exception:
+            pass
 
 
 SL_BUFFER = 0.03  # sweep darajasidan qo'shimcha zaxira (USD) - tasodifiy tebranishdan himoya
@@ -1017,22 +1025,25 @@ def run_signal_check(df, price_data, interval="5min"):
         session_warning = "\n⏰ Sessiyadan tashqarida (kam hajm)"
 
     htf_warning = ""
-    htf_bias = get_htf_bias(df)
-    if htf_bias != "neutral" and htf_bias != signal_direction:
-        htf_bias_uz = "yuqoriga" if htf_bias == "bullish" else "pastga"
-        htf_warning = f"\n📐 1H trendga qarshi (umumiy {htf_bias_uz})"
-
     htf_zone_info = ""
     entry_price = float(price_data["price"])
-    htf_zones = find_htf_zones(df)
-    matching_zones = [z for z in htf_zones if z[0] <= entry_price <= z[1]]
-    if matching_zones:
-        zone_types_uz = {
-            "bullish_fvg": "FVG", "bearish_fvg": "FVG",
-            "bullish_ob": "OB", "bearish_ob": "OB",
-        }
-        types_found = sorted(set(zone_types_uz.get(z[2], z[2]) for z in matching_zones))
-        htf_zone_info = f"\nℹ️ 1H {'/'.join(types_found)} zonasida"
+    if interval != "1min":
+        # 1H konteksti faqat 5m uchun hisoblanadi - 1m uchun yetarli tarixiy
+        # ma'lumot (450 svecha = ~7.5 soat) 1H hisob-kitobi uchun kifoya emas
+        htf_bias = get_htf_bias(df)
+        if htf_bias != "neutral" and htf_bias != signal_direction:
+            htf_bias_uz = "yuqoriga" if htf_bias == "bullish" else "pastga"
+            htf_warning = f"\n📐 1H trendga qarshi (umumiy {htf_bias_uz})"
+
+        htf_zones = find_htf_zones(df)
+        matching_zones = [z for z in htf_zones if z[0] <= entry_price <= z[1]]
+        if matching_zones:
+            zone_types_uz = {
+                "bullish_fvg": "FVG", "bearish_fvg": "FVG",
+                "bullish_ob": "OB", "bearish_ob": "OB",
+            }
+            types_found = sorted(set(zone_types_uz.get(z[2], z[2]) for z in matching_zones))
+            htf_zone_info = f"\nℹ️ 1H {'/'.join(types_found)} zonasida"
 
     if signal["type"] == "jackpot_spring":
         emoji, label = "🎰🟢", f"{tf_tag} JACKPOT: Spring + Test (BULLISH)"
