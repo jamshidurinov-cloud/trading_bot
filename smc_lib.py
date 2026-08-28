@@ -481,7 +481,15 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
                 )
                 continue
 
-            if best is None or fvg_idx > best["_fvg_idx"]:
+            # Tanlov mezoni: avval FVG yangiligi (kattaroq fvg_idx), TENG bo'lsa
+            # esa eng SO'NGGI (eng yaqin) sweep'ni afzal ko'ramiz - eski, unutilgan
+            # sweep o'rniga yangi, dolzarbroq sweep ko'rsatilishi uchun
+            is_better = (
+                best is None
+                or fvg_idx > best["_fvg_idx"]
+                or (fvg_idx == best["_fvg_idx"] and swept_idx > best["sweep_idx"])
+            )
+            if is_better:
                 fvg_row = fvg_candidates.loc[fvg_idx]
                 best = {
                     "sweep_idx": swept_idx,
