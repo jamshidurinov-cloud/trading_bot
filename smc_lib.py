@@ -16,6 +16,7 @@ ishlamadi) - Render'da esa requirements.txt orqali to'g'ridan-to'g'ri o'rnatilad
 from functools import wraps
 import pandas as pd
 import numpy as np
+from sweep_lib import detect_sweep_events
 from pandas import DataFrame, Series
 from datetime import datetime
 
@@ -438,9 +439,15 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
     times = sub.index
 
     swings = smc.swing_highs_lows(sub, swing_length=swing_length)
-    liq = smc.liquidity(sub, swings, range_percent=range_percent)
     fvg_df = smc.fvg(sub, join_consecutive=False)
     bc = smc.bos_choch(sub, swings, close_break=True)
+
+    # Sweep endi sweep_lib.py ("Liquidity Sweep v2" g'oyasidan) orqali topiladi:
+    # faqat TRAP (narx darajani buzib, QAYTIB yopilgan) haqiqiy sweep hisoblanadi.
+    # BREAK (narx darajani buzib, o'sha tomonda davom etgan) - bu sweep EMAS,
+    # oddiy struktura sinishi/trend davomiyligi, shuning uchun rad etiladi.
+    sweep_events = detect_sweep_events(sub, swing_window=swing_length, expiry_bars=lookback, confirmation="close")
+    traps = [e for e in sweep_events if e["type"] == "trap"]
 
     avg_range = (sub["high"] - sub["low"]).mean()
     if avg_range == 0:
@@ -448,19 +455,18 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
     min_fvg_size = avg_range * min_fvg_mult
 
     def find_signal(direction):
-        # bullish uchun: Liquidity==-1 (teng tublar) sweep qilingan -> keyin bullish FVG
-        # bearish uchun: Liquidity==1 (teng cho'qqilar) sweep qilingan -> keyin bearish FVG
-        liq_type = -1 if direction == "bullish" else 1
+        # bullish uchun: PAST tomondagi trap (support sweep, qaytib yopilgan) -> keyin bullish FVG
+        # bearish uchun: YUQORI tomondagi trap (resistance sweep, qaytib yopilgan) -> keyin bearish FVG
         fvg_type = 1 if direction == "bullish" else -1
 
-        candidates = liq[(liq["Liquidity"] == liq_type) & liq["Swept"].notna() & (liq["Swept"] > 0)]
-        if candidates.empty:
-            return None, f"{direction}: hech qanday sweep qilingan likvidlik (teng cho'qqi/tub) topilmadi"
+        candidates = [e for e in traps if e["direction"] == direction]
+        if not candidates:
+            return None, f"{direction}: hech qanday TRAP (haqiqiy sweep) topilmadi"
 
         best = None
         rejected_reasons = []
-        for sweep_idx, row in candidates.iterrows():
-            swept_idx = int(row["Swept"])
+        for trap in candidates:
+            swept_idx = trap["event_idx"]
             fvg_candidates = fvg_df[
                 (fvg_df["FVG"] == fvg_type)
                 & (fvg_df.index > swept_idx)
@@ -468,7 +474,7 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
             ]
             if fvg_candidates.empty:
                 rejected_reasons.append(
-                    f"sweep@{swept_idx}(lvl={row['Level']:.2f}) - keyin mos FVG topilmadi"
+                    f"sweep@{swept_idx}(lvl={trap['level']:.2f}) - keyin mos FVG topilmadi"
                 )
                 continue
             fvg_idx = fvg_candidates.index[-1]  # eng so'nggi mos FVG
@@ -493,7 +499,7 @@ def detect_smc_official_signal(df, lookback=144, swing_length=6, fresh_break_win
                 fvg_row = fvg_candidates.loc[fvg_idx]
                 best = {
                     "sweep_idx": swept_idx,
-                    "sweep_level": float(row["Level"]),
+                    "sweep_level": float(trap["level"]),
                     "fvg_idx": fvg_idx,
                     "fvg_top": float(fvg_row["Top"]),
                     "fvg_bottom": float(fvg_row["Bottom"]),
