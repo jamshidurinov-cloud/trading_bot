@@ -722,6 +722,18 @@ def log_new_signal(signal, price_data, interval):
         "outcome": None,
     })
     save_signal_log(log)
+    print(f"[TRACKING] Signal muvaffaqiyatli saqlandi. Jami yozuvlar soni: {len(log)}")
+
+    # Tasdiqlash: darhol qayta o'qib, haqiqatan saqlanganini tekshiramiz
+    verify_log = load_signal_log()
+    if len(verify_log) != len(log):
+        msg = (f"⚠️ TRACKING NOMUVOFIQLIK: saqlashdan keyin {len(log)} ta yozuv "
+               f"kutilgan edi, lekin qayta o'qishda {len(verify_log)} ta topildi!")
+        print(msg)
+        try:
+            send_telegram_message(msg)
+        except Exception:
+            pass
 
 
 def evaluate_pending_signals():
@@ -736,7 +748,7 @@ def evaluate_pending_signals():
     import datetime as dt
 
     log = load_signal_log()
-    pending = [e for e in log if not e.get("checked") and e.get("interval", "5min") != "1min"]
+    pending = [e for e in log if not e.get("checked")]
     if not pending:
         checked = [e for e in log if e.get("checked")]
         return _build_stats(log, checked)
@@ -863,9 +875,7 @@ def _build_stats(log, checked):
     import datetime as dt
 
     valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5", "tp10", "tp15"}
-    # 1m butunlay chetlab o'tiladi - faqat 5min hisoblanadi
-    checked = [e for e in checked
-               if e.get("outcome") in valid_outcomes and e.get("interval", "5min") != "1min"]
+    checked = [e for e in checked if e.get("outcome") in valid_outcomes]
 
     overall = _stats_for_subset(checked)
 
@@ -912,7 +922,7 @@ def _build_stats(log, checked):
             recent.append(e)
     recent_stats = _stats_for_subset(recent)
 
-    pending_entries = [e for e in log if not e.get("checked") and e.get("interval", "5min") != "1min"]
+    pending_entries = [e for e in log if not e.get("checked")]
     pending_breakdown = {0: 0, 2: 0, 3: 0}
     for e in pending_entries:
         bt = e.get("best_tp", 0)
