@@ -632,12 +632,22 @@ def save_signal_log(log):
 SL_BUFFER = 0.03  # sweep darajasidan qo'shimcha zaxira (USD) - tasodifiy tebranishdan himoya
 
 
+FVG_SL_BUFFER = 1.0  # FVG asosidagi SL uchun maxsus zaxira (USD) - kengroq, chunki
+                      # sweep asosidagi SL_BUFFER (0.03)dan farqli, bu tor SL
+
+
 def compute_sl_level(signal):
     """Signal strukturasidan SL (stop-loss) darajasini aniqlaydi, kichik zaxira
     (SL_BUFFER) bilan — bu narx aynan sweep/event darajasiga qaytadan tegib,
     lekin buzmasdan o'tgan holatda SL tasodifan darhol urilib qolishining oldini
     oladi. Barcha signal turlariga bir xilda qo'llanadi (avval faqat JACKPOT'da
-    bor edi, endi barchasida)."""
+    bor edi, endi barchasida).
+
+    ESLATMA: smc_official_* uchun SL endi Sweep emas, balki FVG asosida
+    (1 dollar zaxira bilan) - bu strategiyaning asl maqsadiga ("sweep'dan keyin
+    darrov keladigan FVG") mos, torroq, tezroq TP'larga yetuvchi SL beradi.
+    JACKPOT va Spring/Upthrust'da FVG tushunchasi yo'q, shuning uchun ular
+    hamon sweep/event asosida qoladi."""
     if signal["type"] == "smc_bullish":
         return signal["sweep_level"] - SL_BUFFER
     if signal["type"] == "smc_bearish":
@@ -651,9 +661,9 @@ def compute_sl_level(signal):
     if signal["type"] == "jackpot_upthrust":
         return signal["event_high"] + SL_BUFFER
     if signal["type"] == "smc_official_bullish":
-        return signal["sweep_level"] - SL_BUFFER
+        return signal["fvg_bottom"] - FVG_SL_BUFFER
     if signal["type"] == "smc_official_bearish":
-        return signal["sweep_level"] + SL_BUFFER
+        return signal["fvg_top"] + FVG_SL_BUFFER
     if signal["type"] == "ob_fvg_bullish":
         return signal["zone_bottom"] - SL_BUFFER
     return signal["zone_top"] + SL_BUFFER  # ob_fvg_bearish
