@@ -982,9 +982,10 @@ def send_ntfy_alert(title, message, priority="high"):
     uni almashtirmaydi). Telefon qulflangan/uxlab yotgan holatda ham darhol
     yetib borishi uchun. NTFY_TOPIC sozlanmagan bo'lsa, jim o'tkazib yuboriladi."""
     if not NTFY_TOPIC:
+        print("[NTFY] NTFY_TOPIC sozlanmagan (bo'sh/yo'q) - push xabar yuborilmadi.")
         return
     try:
-        requests.post(
+        resp = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode("utf-8"),
             headers={
@@ -994,6 +995,7 @@ def send_ntfy_alert(title, message, priority="high"):
             },
             timeout=10,
         )
+        print(f"[NTFY] Yuborildi (topic={NTFY_TOPIC}), status={resp.status_code}")
     except Exception as e:
         print(f"ntfy.sh xabar yuborishda xatolik: {e}")
 
