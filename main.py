@@ -525,8 +525,20 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 # ============================================================================
 
 def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
-    """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi."""
+    """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
+    Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
+    'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
+    bu asl ma'lumotni (signal aniqlashda ishlatiladigan) o'zgartirmaydi, faqat
+    rasmni "ideal"roq ko'rsatadi."""
     import mplfinance as mpf
+
+    plot_df = df.copy()
+    prev_close = plot_df["close"].shift(1)
+    new_open = prev_close.fillna(plot_df["open"])
+    plot_df["open"] = new_open
+    # high/low'ni yangi 'open' bilan mos qilib kengaytiramiz (vizual uzilish bo'lmasligi uchun)
+    plot_df["high"] = plot_df[["high", "open"]].max(axis=1)
+    plot_df["low"] = plot_df[["low", "open"]].min(axis=1)
 
     mc = mpf.make_marketcolors(
         up="#26a69a", down="#ef5350",
@@ -542,7 +554,7 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
     )
 
     mpf.plot(
-        df,
+        plot_df,
         type="candle",
         volume=False,
         style=style,
