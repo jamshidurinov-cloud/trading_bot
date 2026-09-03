@@ -691,6 +691,31 @@ def get_signal_event_key(signal):
     return None
 
 
+def is_direction_cooldown_active(signal, interval, cooldown_candles=3):
+    """Agar oxirgi `cooldown_candles` svecha ichida, SHU YO'NALISHDA (bullish/
+    bearish) allaqachon signal yuborilgan bo'lsa - True qaytaradi. Bu - bitta
+    katta bozor harakati davomida bir necha marta (turli FVG'lar orqali)
+    signal kelishining oldini oladi, chunki ular aslida bitta imkoniyat."""
+    if not tracking_enabled():
+        return False
+    direction = "bullish" if signal["type"] in (
+        "smc_bullish", "smc_official_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
+    ) else "bearish"
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    cooldown_sec = interval_to_minutes(interval) * cooldown_candles * 60
+    log = load_signal_log()
+    for e in reversed(log):
+        if e.get("interval") != interval or e.get("direction") != direction:
+            continue
+        try:
+            e_time = dt.datetime.fromisoformat(e["time"])
+        except Exception:
+            continue
+        return (now - e_time).total_seconds() <= cooldown_sec
+    return False
+
+
 def is_duplicate_signal(signal, interval):
     """Gist'dagi so'nggi yozuvlar orasida, xuddi shu turdagi va xuddi shu voqea
     vaqtiga ega signal allaqachon yuborilganmi tekshiradi. FRESH_BREAK_WINDOW
@@ -1064,6 +1089,12 @@ def run_signal_check(df, price_data, interval="5min"):
     if is_duplicate_signal(signal, interval):
         print(f"[{interval}] Signal topildi ({signal['type']}), lekin bu voqea "
               f"allaqachon xabar qilingan (event_key={get_signal_event_key(signal)}) — takrorlanmaydi.")
+        return
+
+    if is_direction_cooldown_active(signal, interval):
+        print(f"[{interval}] Signal topildi ({signal['type']}), lekin shu yo'nalishda "
+              f"yaqinda (oxirgi 3 svecha ichida) allaqachon signal yuborilgan — "
+              f"bitta harakatning davomi bo'lishi mumkin, takrorlanmaydi.")
         return
 
     chart_path = make_chart_image(df.tail(150), interval=interval)
