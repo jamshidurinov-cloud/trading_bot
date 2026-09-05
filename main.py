@@ -785,25 +785,32 @@ def log_new_signal(signal, price_data, interval):
     tp10_level = entry_price + sign * 10 * risk
     tp15_level = entry_price + sign * 15 * risk
     event_key = get_signal_event_key(signal)
-
-    # SL/TP tayyor bo'ldi - endi (agar WORKER_URL sozlangan bo'lsa) Worker'ga yuboramiz
-    send_to_worker(
-        event_key=event_key,
-        direction="BUY" if direction == "bullish" else "SELL",
-        entry_price=entry_price,
-        sl_price=sl_level,
-        tp_dict={"TP2": tp2_level, "TP3": tp3_level, "TP5": tp5_level,
-                 "TP10": tp10_level, "TP15": tp15_level},
-        timeframe=interval,
-    )
-
     now_utc = dt.datetime.now(dt.timezone.utc)
+    in_session = is_active_session(now_utc)
+
+    # SL/TP tayyor bo'ldi - Worker'ga FAQAT sessiya ichida (London/NY, 06:00-23:00 UTC)
+    # yuboriladi, chunki statistika sessiya tashqarisida natija sustroq ekanini
+    # ko'rsatgan. Sessiya tashqarisidagi signal Telegram/Gist'ga baribir yoziladi
+    # (kuzatuv uchun), faqat avtomatik ijroga (Worker) YUBORILMAYDI.
+    if in_session:
+        send_to_worker(
+            event_key=event_key,
+            direction="BUY" if direction == "bullish" else "SELL",
+            entry_price=entry_price,
+            sl_price=sl_level,
+            tp_dict={"TP2": tp2_level, "TP3": tp3_level, "TP5": tp5_level,
+                     "TP10": tp10_level, "TP15": tp15_level},
+            timeframe=interval,
+        )
+    else:
+        print(f"[WORKER] Signal sessiya tashqarisida - Worker'ga yuborilmadi (faqat Gist/Telegram'da qoladi).")
+
     log = load_signal_log()
     log.append({
         "time": now_utc.isoformat(),
         "type": signal["type"],
         "interval": interval,
-        "session": "active" if is_active_session(now_utc) else "outside",
+        "session": "active" if in_session else "outside",
         "event_key": event_key,
         "direction": direction,
         "entry_price": entry_price,
