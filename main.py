@@ -21,6 +21,8 @@ TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")  # ntfy.sh orqali tezkor push-bildirishnoma (ixtiyoriy)
+WORKER_URL = os.environ.get("WORKER_URL")  # Trade execution Worker manzili (hali sozlanmagan)
+WORKER_SECRET_KEY = os.environ.get("WORKER_SECRET_KEY")  # Worker bilan aloqa uchun maxfiy kalit
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")      # signal tracking uchun (Gist)
 GIST_ID = os.environ.get("GIST_ID")                # signal tracking uchun (Gist)
 
@@ -734,6 +736,34 @@ def is_duplicate_signal(signal, interval):
     return False
 
 
+def send_to_worker(event_key, direction, entry_price, sl_price, tp_dict, timeframe):
+    """Trade execution Worker'ga (hali qurilmagan/sozlanmagan) signal ma'lumotini
+    yuboradi. WORKER_URL sozlanmagan bo'lsa, jim o'tkazib yuboriladi - hozirgi
+    Telegram/Gist ishlashiga hech qanday ta'sir qilmaydi."""
+    if not WORKER_URL:
+        return
+    import requests
+    payload = {
+        "event_key": event_key,
+        "symbol": "XAUUSD",
+        "timeframe": timeframe,
+        "strategy": "SMC_Sweep_FVG",
+        "direction": direction,  # "BUY" yoki "SELL"
+        "entry_price": entry_price,
+        "sl_price": sl_price,
+        "tp2": tp_dict.get("TP2"),
+        "tp3": tp_dict.get("TP3"),
+        "tp5": tp_dict.get("TP5"),
+        "tp10": tp_dict.get("TP10"),
+        "tp15": tp_dict.get("TP15"),
+    }
+    headers = {"Authorization": f"Bearer {WORKER_SECRET_KEY}"}
+    try:
+        requests.post(WORKER_URL, json=payload, headers=headers, timeout=5)
+    except Exception as e:
+        print(f"Worker'ga yuborishda xato: {e}")
+
+
 def log_new_signal(signal, price_data, interval):
     """Yangi chiqqan signalni SL/TP darajalari bilan tarixga qo'shadi
     (natijasi keyinroq svecha-svecha tekshiriladi)."""
@@ -749,6 +779,24 @@ def log_new_signal(signal, price_data, interval):
         risk = entry_price * 0.001  # nolga bo'linishdan himoya
 
     sign = 1 if direction == "bullish" else -1
+    tp2_level = entry_price + sign * 2 * risk
+    tp3_level = entry_price + sign * 3 * risk
+    tp5_level = entry_price + sign * 5 * risk
+    tp10_level = entry_price + sign * 10 * risk
+    tp15_level = entry_price + sign * 15 * risk
+    event_key = get_signal_event_key(signal)
+
+    # SL/TP tayyor bo'ldi - endi (agar WORKER_URL sozlangan bo'lsa) Worker'ga yuboramiz
+    send_to_worker(
+        event_key=event_key,
+        direction="BUY" if direction == "bullish" else "SELL",
+        entry_price=entry_price,
+        sl_price=sl_level,
+        tp_dict={"TP2": tp2_level, "TP3": tp3_level, "TP5": tp5_level,
+                 "TP10": tp10_level, "TP15": tp15_level},
+        timeframe=interval,
+    )
+
     now_utc = dt.datetime.now(dt.timezone.utc)
     log = load_signal_log()
     log.append({
@@ -756,15 +804,15 @@ def log_new_signal(signal, price_data, interval):
         "type": signal["type"],
         "interval": interval,
         "session": "active" if is_active_session(now_utc) else "outside",
-        "event_key": get_signal_event_key(signal),
+        "event_key": event_key,
         "direction": direction,
         "entry_price": entry_price,
         "sl_level": sl_level,
-        "tp2_level": entry_price + sign * 2 * risk,
-        "tp3_level": entry_price + sign * 3 * risk,
-        "tp5_level": entry_price + sign * 5 * risk,
-        "tp10_level": entry_price + sign * 10 * risk,
-        "tp15_level": entry_price + sign * 15 * risk,
+        "tp2_level": tp2_level,
+        "tp3_level": tp3_level,
+        "tp5_level": tp5_level,
+        "tp10_level": tp10_level,
+        "tp15_level": tp15_level,
         "best_tp": 0,
         "checked": False,
         "outcome": None,
