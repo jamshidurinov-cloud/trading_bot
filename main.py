@@ -788,11 +788,19 @@ def log_new_signal(signal, price_data, interval):
     now_utc = dt.datetime.now(dt.timezone.utc)
     in_session = is_active_session(now_utc)
 
-    # SL/TP tayyor bo'ldi - Worker'ga FAQAT sessiya ichida (London/NY, 06:00-23:00 UTC)
-    # yuboriladi, chunki statistika sessiya tashqarisida natija sustroq ekanini
-    # ko'rsatgan. Sessiya tashqarisidagi signal Telegram/Gist'ga baribir yoziladi
-    # (kuzatuv uchun), faqat avtomatik ijroga (Worker) YUBORILMAYDI.
-    if in_session:
+    # SL/TP tayyor bo'ldi - Worker'ga FAQAT 🔥 SMC signal turlari yuboriladi
+    # (smc_official_bullish/bearish) - chunki statistik jihatdan yagona
+    # ishonchli strategiya shu. JACKPOT, Spring/Upthrust, OB/FVG - hali kichik
+    # namuna, ishonchsiz, shuning uchun Worker'ga (demo avtomatik ijroga)
+    # yuborilmaydi, faqat Telegram/Gist'da (kuzatuv uchun) qoladi.
+    is_smc_signal = signal["type"] in ("smc_official_bullish", "smc_official_bearish")
+
+    # Sessiya ichida HAM, tashqarisida HAM yuboriladi (ikkalasi ham statistik
+    # jihatdan musbat). Faqat bozor HAFTALIK yopilish/ochilish va KUNLIK
+    # NY->Osiyo sokin oralig'idagi notekis davr chetlab o'tiladi.
+    in_buffer = is_market_transition_buffer(now_utc)
+
+    if is_smc_signal and not in_buffer:
         send_to_worker(
             event_key=event_key,
             direction="BUY" if direction == "bullish" else "SELL",
@@ -802,8 +810,10 @@ def log_new_signal(signal, price_data, interval):
                      "TP10": tp10_level, "TP15": tp15_level},
             timeframe=interval,
         )
+    elif not is_smc_signal:
+        print(f"[WORKER] Signal turi ({signal['type']}) SMC emas - Worker'ga yuborilmadi (faqat Gist/Telegram'da qoladi).")
     else:
-        print(f"[WORKER] Signal sessiya tashqarisida - Worker'ga yuborilmadi (faqat Gist/Telegram'da qoladi).")
+        print(f"[WORKER] Bozor yopilish/ochilish buferida - Worker'ga yuborilmadi (faqat Gist/Telegram'da qoladi).")
 
     log = load_signal_log()
     log.append({
@@ -1115,6 +1125,39 @@ def is_active_session(timestamp):
     except AttributeError:
         return True  # vaqt aniqlanmasa, filtrlamaymiz (xavfsiz tomonga)
     return 6 <= hour < 23
+
+
+def is_market_transition_buffer(now_utc, buffer_minutes=60):
+    """Bozor bufer vaqtlarini aniqlaydi - bu davrlarda narx harakati notekis,
+    hajm/likvidlik past, spread keng bo'lishi mumkin. Ikkita holat tekshiriladi:
+
+    1. HAFTALIK: Juma yopilishi (~22:00 UTC) va Yakshanba ochilishi (~22:00 UTC)
+       atrofidagi 1 soatlik bufer.
+    2. KUNLIK: har kuni (Dushanba-Juma) Nyu-York yopilishi va Osiyo (Sidney)
+       ochilishi orasidagi ~21:00-23:00 UTC "sokin oraliq" - Nyu-York
+       yopilgach hajm keskin qurib qoladi, Tokio (00:00 UTC) ochilgunicha
+       harakat notekis bo'lishi mumkin.
+
+    Aniq vaqtlar taxminiy standart (broker/DST'ga qarab biroz farq qilishi
+    mumkin)."""
+    weekday = now_utc.weekday()  # Monday=0 ... Friday=4, Saturday=5, Sunday=6
+    minutes_of_day = now_utc.hour * 60 + now_utc.minute
+    close_minutes = 22 * 60  # taxminan 22:00 UTC - Juma yopilishi
+    open_minutes = 22 * 60   # taxminan 22:00 UTC - Yakshanba ochilishi
+
+    if weekday == 4 and (close_minutes - buffer_minutes) <= minutes_of_day <= close_minutes:
+        return True  # Juma, yopilishdan 1 soat oldin
+    if weekday == 6 and open_minutes <= minutes_of_day <= (open_minutes + buffer_minutes):
+        return True  # Yakshanba, ochilishdan 1 soat keyingacha
+
+    # Kunlik NY->Osiyo "sokin oraliq": Dushanba-Juma, 21:00-23:00 UTC
+    if weekday in (0, 1, 2, 3, 4):
+        daily_start = 21 * 60
+        daily_end = 23 * 60
+        if daily_start <= minutes_of_day < daily_end:
+            return True
+
+    return False
 
 
 def run_signal_check(df, price_data, interval="5min"):
