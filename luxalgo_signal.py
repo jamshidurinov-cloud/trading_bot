@@ -43,21 +43,24 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
     def find_signal(direction):
         candidates = [s for s in sweeps if s["direction"] == direction]
         if not candidates:
-            return None
+            return None, "hech qanday sweep topilmadi"
 
         fvg_dir = direction  # FVG yo'nalishi sweep yo'nalishi bilan BIR XIL
         # (chunki bullish sweep = pastdagi trap/retest, undan keyin BULLISH FVG kutiladi)
         best = None
+        rejected = []
         for sw in candidates:
             sweep_idx = sw["signal_idx"]
             matching_fvgs = [f for f in fvgs if f["direction"] == fvg_dir and f["confirm_idx"] > sweep_idx]
             if not matching_fvgs:
+                rejected.append(f"sweep@{sweep_idx}(lvl={sw['pivot_level']:.2f},{sw['kind']}) - keyin mos FVG yo'q")
                 continue
             fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
             fvg_idx = fvg["confirm_idx"]
 
             if fvg_idx < cur - fresh_break_window + 1:
-                continue  # eskirgan
+                rejected.append(f"sweep@{sweep_idx} + FVG@{fvg_idx} - ESKIRGAN (cur={cur})")
+                continue
 
             is_better = (
                 best is None
@@ -68,6 +71,7 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
                 best = {
                     "sweep_idx": sweep_idx,
                     "sweep_level": sw["pivot_level"],
+                    "sweep_kind": sw["kind"],
                     "fvg_idx": fvg_idx,
                     "fvg_top": fvg["top"],
                     "fvg_bottom": fvg["bottom"],
@@ -76,11 +80,14 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
                 }
 
         if best is None:
-            return None
+            last_sweep = candidates[-1]
+            reason = (f"{len(candidates)} ta sweep topildi (eng so'nggisi: @{last_sweep['signal_idx']}, "
+                      f"lvl={last_sweep['pivot_level']:.2f}, {last_sweep['kind']}), lekin hech biri mos FVG "
+                      f"bilan bog'lanmadi. " + " | ".join(rejected[-3:]))
+            return None, reason
 
         has_structure = False
         structure_kind = None
-        expected = 1 if direction == "bullish" else -1
         for ev in bos_events:
             if ev["direction"] == direction and best["sweep_idx"] <= ev["break_idx"] <= cur:
                 has_structure = True
@@ -96,10 +103,13 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
             "has_structure": has_structure,
             "structure_kind": structure_kind,
             "current_close": float(sub["close"].iloc[cur]),
-        }
+        }, None
 
-    bullish_signal = find_signal("bullish")
-    bearish_signal = find_signal("bearish")
+    bullish_signal, bull_reason = find_signal("bullish")
+    bearish_signal, bear_reason = find_signal("bearish")
+
+    if bullish_signal is None and bearish_signal is None:
+        print(f"[LUXALGO DEBUG] bullish: {bull_reason} || bearish: {bear_reason}")
 
     if bullish_signal and bearish_signal:
         return bullish_signal if bullish_signal["fvg_time"] >= bearish_signal["fvg_time"] else bearish_signal
