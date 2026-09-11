@@ -140,23 +140,36 @@ def get_gold_candles(interval="5min", outputsize=100, max_retries=3):
 
 
 
-def get_forex_calendar_events(hours_ahead=24):
+def get_forex_calendar_events(hours_ahead=24, max_retries=2):
     """Forex Factory'ning ochiq JSON kalendaridan yaqin soatlardagi yuqori ta'sirli
     USD iqtisodiy yangiliklarini oladi (Fed, NFP, CPI kabi — bular XAUUSD'ga eng
     ko'p ta'sir qiladigan voqealar). Diqqat: bu manzilga 5 daqiqada faqat 2 marta
-    so'rov yuborish mumkin — shuning uchun faqat soatlik status rejimida chaqiriladi."""
+    so'rov yuborish mumkin — shuning uchun faqat soatlik status rejimida chaqiriladi.
+    Bu funksiya soatiga faqat 1 marta chaqirilsa ham, Render'ning ulashilgan IP
+    manzili orqali BOSHQA foydalanuvchilar trafigi bilan bir xil limitga tushib
+    qolishi mumkin - shuning uchun qayta urinish qo'shilgan."""
     import datetime as dt
+    import time
     from dateutil import parser as date_parser
 
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-    resp.raise_for_status()
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            text = resp.text.strip()
+            if text.startswith("<") or "Request Denied" in text:
+                raise RuntimeError("Forex Factory limitga tegib qoldi (5 daqiqada 2 so'rovdan ko'p)")
+            events = resp.json()
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(8)  # boshqa foydalanuvchilar limitining "tozalanishi" uchun kutamiz
+                continue
+            raise last_error
 
-    text = resp.text.strip()
-    if text.startswith("<") or "Request Denied" in text:
-        raise RuntimeError("Forex Factory limitga tegib qoldi (5 daqiqada 2 so'rovdan ko'p)")
-
-    events = resp.json()
     now = dt.datetime.now(dt.timezone.utc)
     horizon = now + dt.timedelta(hours=hours_ahead)
 
@@ -192,7 +205,7 @@ from jackpot_signal import (
     find_swing_points, cluster_equal_levels, detect_dynamic_range,
     detect_dynamic_spring_upthrust, detect_jackpot_signal, detect_ob_fvg_entry,
 )
-from smc_lib import detect_smc_official_signal
+from luxalgo_signal import detect_luxalgo_signal
 
 
 PROMINENCE_WINDOW = 40   # Sweep uchun: "ajralib turgan" darajani aniqlash oynasi
@@ -646,7 +659,7 @@ def save_signal_log(log):
 SL_BUFFER = 0.03  # sweep darajasidan qo'shimcha zaxira (USD) - tasodifiy tebranishdan himoya
 
 
-FVG_SL_BUFFER = 1.0  # FVG asosidagi SL uchun maxsus zaxira (USD) - kengroq, chunki
+FVG_SL_BUFFER = 0.20  # FVG asosidagi SL uchun maxsus zaxira (USD) - tor, chunki
                       # sweep asosidagi SL_BUFFER (0.03)dan farqli, bu tor SL
 
 
@@ -674,9 +687,9 @@ def compute_sl_level(signal):
         return signal["event_low"] - SL_BUFFER
     if signal["type"] == "jackpot_upthrust":
         return signal["event_high"] + SL_BUFFER
-    if signal["type"] == "smc_official_bullish":
+    if signal["type"] == "luxalgo_bullish":
         return signal["fvg_bottom"] - FVG_SL_BUFFER
-    if signal["type"] == "smc_official_bearish":
+    if signal["type"] == "luxalgo_bearish":
         return signal["fvg_top"] + FVG_SL_BUFFER
     if signal["type"] == "ob_fvg_bullish":
         return signal["zone_bottom"] - SL_BUFFER
@@ -701,7 +714,7 @@ def is_direction_cooldown_active(signal, interval, cooldown_candles=3):
     if not tracking_enabled():
         return False
     direction = "bullish" if signal["type"] in (
-        "smc_bullish", "smc_official_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
+        "smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
     ) else "bearish"
     import datetime as dt
     now = dt.datetime.now(dt.timezone.utc)
@@ -754,7 +767,9 @@ def send_to_worker(event_key, direction, entry_price, sl_price, tp_dict, timefra
         "tp2": tp_dict.get("TP2"),
         "tp3": tp_dict.get("TP3"),
         "tp5": tp_dict.get("TP5"),
+        "tp8": tp_dict.get("TP8"),
         "tp10": tp_dict.get("TP10"),
+        "tp12": tp_dict.get("TP12"),
         "tp15": tp_dict.get("TP15"),
     }
     headers = {"Authorization": f"Bearer {WORKER_SECRET_KEY}"}
@@ -771,7 +786,7 @@ def log_new_signal(signal, price_data, interval):
         return
     import datetime as dt
 
-    direction = "bullish" if signal["type"] in ("smc_bullish", "smc_official_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
+    direction = "bullish" if signal["type"] in ("smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
     entry_price = float(price_data["price"])
     sl_level = float(compute_sl_level(signal))
     risk = abs(entry_price - sl_level)
@@ -782,18 +797,20 @@ def log_new_signal(signal, price_data, interval):
     tp2_level = entry_price + sign * 2 * risk
     tp3_level = entry_price + sign * 3 * risk
     tp5_level = entry_price + sign * 5 * risk
+    tp8_level = entry_price + sign * 8 * risk
     tp10_level = entry_price + sign * 10 * risk
+    tp12_level = entry_price + sign * 12 * risk
     tp15_level = entry_price + sign * 15 * risk
     event_key = get_signal_event_key(signal)
     now_utc = dt.datetime.now(dt.timezone.utc)
     in_session = is_active_session(now_utc)
 
     # SL/TP tayyor bo'ldi - Worker'ga FAQAT 🔥 SMC signal turlari yuboriladi
-    # (smc_official_bullish/bearish) - chunki statistik jihatdan yagona
+    # (luxalgo_bullish/bearish) - chunki statistik jihatdan yagona
     # ishonchli strategiya shu. JACKPOT, Spring/Upthrust, OB/FVG - hali kichik
     # namuna, ishonchsiz, shuning uchun Worker'ga (demo avtomatik ijroga)
     # yuborilmaydi, faqat Telegram/Gist'da (kuzatuv uchun) qoladi.
-    is_smc_signal = signal["type"] in ("smc_official_bullish", "smc_official_bearish")
+    is_smc_signal = signal["type"] in ("luxalgo_bullish", "luxalgo_bearish")
 
     # Sessiya ichida HAM, tashqarisida HAM yuboriladi (ikkalasi ham statistik
     # jihatdan musbat). Faqat bozor HAFTALIK yopilish/ochilish va KUNLIK
@@ -807,7 +824,8 @@ def log_new_signal(signal, price_data, interval):
             entry_price=entry_price,
             sl_price=sl_level,
             tp_dict={"TP2": tp2_level, "TP3": tp3_level, "TP5": tp5_level,
-                     "TP10": tp10_level, "TP15": tp15_level},
+                     "TP8": tp8_level, "TP10": tp10_level, "TP12": tp12_level,
+                     "TP15": tp15_level},
             timeframe=interval,
         )
     elif not is_smc_signal:
@@ -828,7 +846,9 @@ def log_new_signal(signal, price_data, interval):
         "tp2_level": tp2_level,
         "tp3_level": tp3_level,
         "tp5_level": tp5_level,
+        "tp8_level": tp8_level,
         "tp10_level": tp10_level,
+        "tp12_level": tp12_level,
         "tp15_level": tp15_level,
         "best_tp": 0,
         "checked": False,
@@ -911,7 +931,8 @@ def evaluate_pending_signals():
         direction = entry["direction"]
         sl = entry["sl_level"]
         tp_levels = {2: entry.get("tp2_level"), 3: entry.get("tp3_level"), 5: entry.get("tp5_level"),
-                     10: entry.get("tp10_level"), 15: entry.get("tp15_level")}
+                     8: entry.get("tp8_level"), 10: entry.get("tp10_level"), 12: entry.get("tp12_level"),
+                     15: entry.get("tp15_level")}
         best_tp_before = entry.get("best_tp", 0)
         best_tp = best_tp_before
         hit_sl = False
@@ -924,7 +945,7 @@ def evaluate_pending_signals():
                 hit_sl = True
                 break
 
-            for level_num in (2, 3, 5, 10, 15):
+            for level_num in (2, 3, 5, 8, 10, 12, 15):
                 if best_tp >= level_num or tp_levels[level_num] is None:
                     continue
                 level_price = tp_levels[level_num]
@@ -958,7 +979,7 @@ def evaluate_pending_signals():
     return _build_stats(log, checked)
 
 
-R_MAP = {"loss": -1, "timeout": 0, "tp2": 2, "tp3": 3, "tp5": 5, "tp10": 10, "tp15": 15}
+R_MAP = {"loss": -1, "timeout": 0, "tp2": 2, "tp3": 3, "tp5": 5, "tp8": 8, "tp10": 10, "tp12": 12, "tp15": 15}
 
 
 def _stats_for_subset(checked):
@@ -968,15 +989,18 @@ def _stats_for_subset(checked):
     tp2 = sum(1 for e in checked if e["outcome"] == "tp2")
     tp3 = sum(1 for e in checked if e["outcome"] == "tp3")
     tp5 = sum(1 for e in checked if e["outcome"] == "tp5")
+    tp8 = sum(1 for e in checked if e["outcome"] == "tp8")
     tp10 = sum(1 for e in checked if e["outcome"] == "tp10")
+    tp12 = sum(1 for e in checked if e["outcome"] == "tp12")
     tp15 = sum(1 for e in checked if e["outcome"] == "tp15")
-    wins = tp2 + tp3 + tp5 + tp10 + tp15
+    wins = tp2 + tp3 + tp5 + tp8 + tp10 + tp12 + tp15
     win_rate = round(wins / total * 100, 1) if total else None
     total_r = sum(R_MAP.get(e["outcome"], 0) for e in checked)
     avg_r = round(total_r / total, 2) if total else None
     return {
         "total_checked": total, "wins": wins, "losses": losses, "timeouts": timeouts,
-        "tp2": tp2, "tp3": tp3, "tp5": tp5, "tp10": tp10, "tp15": tp15, "win_rate": win_rate,
+        "tp2": tp2, "tp3": tp3, "tp5": tp5, "tp8": tp8, "tp10": tp10, "tp12": tp12,
+        "tp15": tp15, "win_rate": win_rate,
         "total_r": total_r, "avg_r": avg_r,
     }
 
@@ -987,7 +1011,7 @@ ROLLING_WINDOW_HOURS = 4  # "so'nggi N soatlik" statistika oynasi
 def _build_stats(log, checked):
     import datetime as dt
 
-    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5", "tp10", "tp15"}
+    valid_outcomes = {"loss", "timeout", "tp2", "tp3", "tp5", "tp8", "tp10", "tp12", "tp15"}
     checked = [e for e in checked if e.get("outcome") in valid_outcomes]
 
     overall = _stats_for_subset(checked)
@@ -1005,7 +1029,7 @@ def _build_stats(log, checked):
         "jackpot_spring": "jackpot", "jackpot_upthrust": "jackpot",
         "ob_fvg_bullish": "ob_fvg", "ob_fvg_bearish": "ob_fvg",
         "smc_bullish": "smc", "smc_bearish": "smc",
-        "smc_official_bullish": "smc", "smc_official_bearish": "smc",
+        "luxalgo_bullish": "smc", "luxalgo_bearish": "smc",
         "dynamic_spring": "dynamic", "dynamic_upthrust": "dynamic",
     }
     by_type = {}
@@ -1166,7 +1190,7 @@ def run_signal_check(df, price_data, interval="5min"):
     ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=144)
     # 🔥 SMC signal endi 'smartmoneyconcepts' (LuxAlgo'dan portlangan, sinalgan)
     # kutubxonasi asosida - BOS va CHoCH'ni aniq, pattern-matching orqali ajratadi
-    smc = None if (jackpot or ob_fvg) else detect_smc_official_signal(df, lookback=144)
+    smc = None if (jackpot or ob_fvg) else detect_luxalgo_signal(df, lookback=144)
     dynamic = None if (jackpot or ob_fvg or smc) else detect_dynamic_spring_upthrust(df, lookback=144)
     signal = jackpot or ob_fvg or smc or dynamic
 
@@ -1199,7 +1223,7 @@ def run_signal_check(df, price_data, interval="5min"):
 
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
-    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "smc_official_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
+    signal_direction = "bullish" if signal["type"] in ("smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish") else "bearish"
     trend_warning = ""
     if bias != "neutral" and bias != signal_direction:
         bias_uz = "yuqoriga" if bias == "bullish" else "pastga"
@@ -1248,7 +1272,7 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Sweep: {signal['event_high']:.2f}  |  Test: {signal['test_high']:.2f}\n"
             f"Hozir: {signal['current_close']:.2f}"
         )
-    elif signal["type"] == "smc_official_bullish":
+    elif signal["type"] == "luxalgo_bullish":
         structure_note = f" + {signal['structure_kind']}" if signal["has_structure"] else ""
         emoji, label = "🔥🟢", f"{tf_tag} SMC: Sweep + FVG{structure_note} (BULLISH)"
         caption = (
@@ -1257,7 +1281,7 @@ def run_signal_check(df, price_data, interval="5min"):
             f"Sweep darajasi: {signal['sweep_level']:.2f}\n"
             f"FVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}"
         )
-    elif signal["type"] == "smc_official_bearish":
+    elif signal["type"] == "luxalgo_bearish":
         structure_note = f" + {signal['structure_kind']}" if signal["has_structure"] else ""
         emoji, label = "🔥🔴", f"{tf_tag} SMC: Sweep + FVG{structure_note} (BEARISH)"
         caption = (
@@ -1371,7 +1395,8 @@ def run_hourly_status(df, price_data, interval="5min"):
                     f"\n📈 Umumiy statistika: {stats['total_checked']} ta yopilgan signal — "
                     f"aniqlik: {stats['win_rate']}%, jami: {stats['total_r']:+g}R "
                     f"(o'rtacha {stats['avg_r']:+g}R/signal)\n"
-                    f"🚀 TP15x: {stats['tp15']} | 💎 TP10x: {stats['tp10']} | 🔥 TP5x: {stats['tp5']} | "
+                    f"🚀 TP15x: {stats['tp15']} | 🎯 TP12x: {stats['tp12']} | 💎 TP10x: {stats['tp10']} | "
+                    f"⭐ TP8x: {stats['tp8']} | 🔥 TP5x: {stats['tp5']} | "
                     f"🟢 TP3x: {stats['tp3']} | 🟡 TP2x: {stats['tp2']} | "
                     f"❌ SL: {stats['losses']} | ⏱ muddati o'tgan: {stats['timeouts']}"
                 )
@@ -1379,7 +1404,7 @@ def run_hourly_status(df, price_data, interval="5min"):
                     lines.append(
                         f"\n▫️ [{iv}]: {s['total_checked']} ta — aniqlik: {s['win_rate']}%, "
                         f"{s['total_r']:+g}R (o'rt {s['avg_r']:+g}R) "
-                        f"(🚀{s['tp15']} 💎{s['tp10']} 🔥{s['tp5']} 🟢{s['tp3']} 🟡{s['tp2']} "
+                        f"(🚀{s['tp15']} 🎯{s['tp12']} 💎{s['tp10']} ⭐{s['tp8']} 🔥{s['tp5']} 🟢{s['tp3']} 🟡{s['tp2']} "
                         f"❌{s['losses']} ⏱{s['timeouts']})"
                     )
                 lines.append("\n📊 Strategiya bo'yicha:")
@@ -1409,7 +1434,7 @@ def run_hourly_status(df, price_data, interval="5min"):
                     lines.append(
                         f"\n🕓 So'nggi {ROLLING_WINDOW_HOURS} soat: {r['total_checked']} ta — "
                         f"aniqlik: {r['win_rate']}%, {r['total_r']:+g}R "
-                        f"(🚀{r['tp15']} 💎{r['tp10']} 🔥{r['tp5']} 🟢{r['tp3']} 🟡{r['tp2']} "
+                        f"(🚀{r['tp15']} 🎯{r['tp12']} 💎{r['tp10']} ⭐{r['tp8']} 🔥{r['tp5']} 🟢{r['tp3']} 🟡{r['tp2']} "
                         f"❌{r['losses']} ⏱{r['timeouts']})"
                     )
                 else:
@@ -1417,8 +1442,12 @@ def run_hourly_status(df, price_data, interval="5min"):
                 if stats["pending"] > 0:
                     pb = stats["pending_breakdown"]
                     parts = []
+                    if pb.get(12, 0) > 0:
+                        parts.append(f"🎯 {pb[12]} ta 12x da")
                     if pb.get(10, 0) > 0:
                         parts.append(f"💎 {pb[10]} ta 10x da")
+                    if pb.get(8, 0) > 0:
+                        parts.append(f"⭐ {pb[8]} ta 8x da")
                     if pb.get(5, 0) > 0:
                         parts.append(f"🔥 {pb[5]} ta 5x da")
                     if pb.get(3, 0) > 0:
