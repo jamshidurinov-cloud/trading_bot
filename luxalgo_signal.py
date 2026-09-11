@@ -49,7 +49,8 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
         # (chunki bullish sweep = pastdagi trap/retest, undan keyin BULLISH FVG kutiladi)
         best = None
         rejected = []
-        for sw in candidates:
+        # ENG YANGI sweep'dan boshlab tekshiramiz (eski sweep muammosidan qochish uchun)
+        for sw in reversed(candidates):
             sweep_idx = sw["signal_idx"]
             matching_fvgs = [f for f in fvgs if f["direction"] == fvg_dir
                               and f["confirm_idx"] > sweep_idx
@@ -57,29 +58,24 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
             if not matching_fvgs:
                 rejected.append(f"sweep@{sweep_idx}(lvl={sw['pivot_level']:.2f},{sw['kind']}) - keyin mos FVG yo'q")
                 continue
-            fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
+            # SODDALASHTIRILDI: "eng yaxshisi"ni qidirmasdan, TOPILGAN BIRINCHI
+            # mos FVG bilan darhol signal beriladi (murakkab tanlov olib tashlandi)
+            fvg = matching_fvgs[0]
             fvg_idx = fvg["confirm_idx"]
 
             if fvg_idx < cur - fresh_break_window + 1:
                 rejected.append(f"sweep@{sweep_idx} + FVG@{fvg_idx} - ESKIRGAN (cur={cur})")
                 continue
 
-            is_better = (
-                best is None
-                or fvg_idx > best["_fvg_idx"]
-                or (fvg_idx == best["_fvg_idx"] and sweep_idx > best["_sweep_idx"])
-            )
-            if is_better:
-                best = {
-                    "sweep_idx": sweep_idx,
-                    "sweep_level": sw["pivot_level"],
-                    "sweep_kind": sw["kind"],
-                    "fvg_idx": fvg_idx,
-                    "fvg_top": fvg["top"],
-                    "fvg_bottom": fvg["bottom"],
-                    "_fvg_idx": fvg_idx,
-                    "_sweep_idx": sweep_idx,
-                }
+            best = {
+                "sweep_idx": sweep_idx,
+                "sweep_level": sw["pivot_level"],
+                "sweep_kind": sw["kind"],
+                "fvg_idx": fvg_idx,
+                "fvg_top": fvg["top"],
+                "fvg_bottom": fvg["bottom"],
+            }
+            break  # birinchi mos juftlik topildi - qidiruvni tox tatamiz
 
         if best is None:
             last_sweep = candidates[-1]
