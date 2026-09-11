@@ -589,12 +589,16 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 # GRAFIK CHIZISH
 # ============================================================================
 
-def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
+def make_chart_image(df, path="/tmp/chart.png", interval="5min",
+                      sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
     Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
     'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
     bu asl ma'lumotni (signal aniqlashda ishlatiladigan) o'zgartirmaydi, faqat
-    rasmni "ideal"roq ko'rsatadi."""
+    rasmni "ideal"roq ko'rsatadi.
+
+    Agar sweep_level va/yoki fvg_top/fvg_bottom berilsa - ular grafikda
+    chiziqlar/soyali zona sifatida ko'rsatiladi (aniq narx yorlig'i bilan)."""
     import mplfinance as mpf
 
     plot_df = df.copy()
@@ -618,7 +622,9 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
         rc={"font.size": 11, "axes.labelsize": 12, "axes.titlesize": 14},
     )
 
-    mpf.plot(
+    has_overlay = sweep_level is not None or (fvg_top is not None and fvg_bottom is not None)
+
+    fig, axlist = mpf.plot(
         plot_df,
         type="candle",
         volume=False,
@@ -628,8 +634,29 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min"):
         figsize=(16, 9),
         tight_layout=True,
         scale_padding={"left": 0.3, "right": 0.7, "top": 0.8, "bottom": 0.5},
-        savefig=dict(fname=path, dpi=220, bbox_inches="tight"),
+        returnfig=True,
     )
+    ax = axlist[0]
+
+    if has_overlay:
+        fvg_color = "#26a69a" if direction == "bullish" else "#ef5350"
+        sweep_color = "#ef5350" if direction == "bullish" else "#26a69a"
+        # bullish: sweep past darajada (qizil - "buzilgan qollab-quvvatlash"),
+        # FVG kirish zonasi (yashil). bearish - teskarisi.
+
+        if fvg_top is not None and fvg_bottom is not None:
+            ax.axhspan(fvg_bottom, fvg_top, color=fvg_color, alpha=0.18, zorder=0)
+            ax.text(len(plot_df) * 0.01, fvg_top, f"FVG {fvg_bottom:.2f}-{fvg_top:.2f}",
+                    color=fvg_color, fontsize=10, va="bottom", fontweight="bold")
+
+        if sweep_level is not None:
+            ax.axhline(sweep_level, color=sweep_color, linestyle="--", linewidth=1.5, zorder=1)
+            ax.text(len(plot_df) * 0.01, sweep_level, f"Sweep {sweep_level:.2f}",
+                    color=sweep_color, fontsize=10, va="bottom", fontweight="bold")
+
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    import matplotlib.pyplot as plt
+    plt.close(fig)
     return path
 
 
@@ -1269,7 +1296,17 @@ def run_signal_check(df, price_data, interval="5min"):
               f"bitta harakatning davomi bo'lishi mumkin, takrorlanmaydi.")
         return
 
-    chart_path = make_chart_image(df.tail(150), interval=interval)
+    chart_sweep = signal.get("sweep_level")
+    chart_fvg_top = signal.get("fvg_top")
+    chart_fvg_bottom = signal.get("fvg_bottom")
+    chart_direction = "bullish" if signal["type"] in (
+        "smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
+    ) else "bearish"
+    chart_path = make_chart_image(
+        df.tail(150), interval=interval,
+        sweep_level=chart_sweep, fvg_top=chart_fvg_top, fvg_bottom=chart_fvg_bottom,
+        direction=chart_direction,
+    )
 
     tf_tag = f"[{interval}]"
     bias = get_trend_bias(df)
