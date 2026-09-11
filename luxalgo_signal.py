@@ -51,7 +51,9 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
         rejected = []
         for sw in candidates:
             sweep_idx = sw["signal_idx"]
-            matching_fvgs = [f for f in fvgs if f["direction"] == fvg_dir and f["confirm_idx"] > sweep_idx]
+            matching_fvgs = [f for f in fvgs if f["direction"] == fvg_dir
+                              and f["confirm_idx"] > sweep_idx
+                              and f["mitigated_idx"] is None]
             if not matching_fvgs:
                 rejected.append(f"sweep@{sweep_idx}(lvl={sw['pivot_level']:.2f},{sw['kind']}) - keyin mos FVG yo'q")
                 continue
