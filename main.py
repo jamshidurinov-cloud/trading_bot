@@ -21,8 +21,9 @@ TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")  # ntfy.sh orqali tezkor push-bildirishnoma (ixtiyoriy)
-WORKER_URL = os.environ.get("WORKER_URL")  # Trade execution Worker manzili (hali sozlanmagan)
+WORKER_URL = os.environ.get("WORKER_URL")  # Trade execution Worker manzili (signal yuborish uchun)
 WORKER_SECRET_KEY = os.environ.get("WORKER_SECRET_KEY")  # Worker bilan aloqa uchun maxfiy kalit
+WORKER_BASE_URL = os.environ.get("WORKER_BASE_URL")  # Worker'ning /candles, /price uchun bazaviy manzili
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")      # signal tracking uchun (Gist)
 GIST_ID = os.environ.get("GIST_ID")                # signal tracking uchun (Gist)
 
@@ -95,6 +96,55 @@ def get_gold_price():
 
 
 def get_gold_candles(interval="5min", outputsize=100, max_retries=3):
+    """Svechalar tarixini (OHLCV) oladi. Agar WORKER_BASE_URL sozlangan bo'lsa,
+    Worker orqali (cTrader'dan, /candles endpoint) oladi - bu, TwelveData'ning
+    500/429 xatoliklarini butunlay bartaraf qiladi. Agar WORKER_BASE_URL hali
+    sozlanmagan bo'lsa - avvalgidek, TwelveData orqali oladi (xavfsiz o'tish
+    uchun, hech narsa sinmasin deb)."""
+    if WORKER_BASE_URL:
+        return _get_candles_from_worker(interval=interval, count=outputsize, max_retries=max_retries)
+    return _get_candles_from_twelvedata(interval=interval, outputsize=outputsize, max_retries=max_retries)
+
+
+def _get_candles_from_worker(interval="5min", count=100, max_retries=3):
+    """Worker'ning /candles endpoint'idan (cTrader ProtoOAGetTrendbarsReq orqali)
+    svechalarni oladi."""
+    import pandas as pd
+    import time
+
+    url = f"{WORKER_BASE_URL.rstrip('/')}/candles"
+    params = {"symbol": "XAUUSD", "timeframe": interval, "count": count}
+    headers = {"Authorization": f"Bearer {WORKER_SECRET_KEY}"}
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=15 + attempt * 5)
+            resp.raise_for_status()
+            values = resp.json()
+            if not isinstance(values, list):
+                raise RuntimeError(f"Worker /candles kutilmagan javob berdi: {values}")
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2 + attempt * 2)
+                continue
+            raise last_error
+
+    df = pd.DataFrame(values)
+    df["time"] = pd.to_datetime(df["time"])
+    df = df.rename(columns={"time": "datetime"}).set_index("datetime").sort_index()
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+        else:
+            df[col] = 0.0
+
+    return df
+
+
+def _get_candles_from_twelvedata(interval="5min", outputsize=100, max_retries=3):
     """TwelveData'dan oxirgi svechalar tarixini (OHLCV) oladi. Tasodifiy tarmoq
     sekinligi (timeout) tufayli butun ishga tushish behuda ketmasligi uchun,
     xatolik bo'lsa bir necha marta qayta urinadi (har safar biroz uzunroq
