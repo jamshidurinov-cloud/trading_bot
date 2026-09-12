@@ -1273,7 +1273,11 @@ def run_signal_check(df, price_data, interval="5min"):
     ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=144)
     # 🔥 SMC signal endi 'smartmoneyconcepts' (LuxAlgo'dan portlangan, sinalgan)
     # kutubxonasi asosida - BOS va CHoCH'ni aniq, pattern-matching orqali ajratadi
-    smc = None if (jackpot or ob_fvg) else detect_luxalgo_signal(df, lookback=144)
+    # MUHIM: lookback 144->300 (bugungi tekshiruv/kelishuv asosida - cTrader/Worker
+    # manbasiga o'tilgani uchun endi 300 ta sham ishonchli olinadi). FAQAT shu
+    # signal turi uchun - jackpot/ob_fvg/dynamic (pastda) ALOHIDA strategiyalar,
+    # ularga bugun tegilmadi, 144'da qoldirildi.
+    smc = None if (jackpot or ob_fvg) else detect_luxalgo_signal(df, lookback=300)
     dynamic = None if (jackpot or ob_fvg or smc) else detect_dynamic_spring_upthrust(df, lookback=144)
     signal = jackpot or ob_fvg or smc or dynamic
 
