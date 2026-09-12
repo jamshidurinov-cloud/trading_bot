@@ -102,7 +102,9 @@ def get_gold_candles(interval="5min", outputsize=100, max_retries=3):
     sozlanmagan bo'lsa - avvalgidek, TwelveData orqali oladi (xavfsiz o'tish
     uchun, hech narsa sinmasin deb)."""
     if WORKER_BASE_URL:
+        print(f"[MA'LUMOT MANBASI] cTrader (Worker) orqali olinmoqda: {WORKER_BASE_URL}")
         return _get_candles_from_worker(interval=interval, count=outputsize, max_retries=max_retries)
+    print("[MA'LUMOT MANBASI] TwelveData orqali olinmoqda (WORKER_BASE_URL sozlanmagan)")
     return _get_candles_from_twelvedata(interval=interval, outputsize=outputsize, max_retries=max_retries)
 
 
@@ -141,6 +143,10 @@ def _get_candles_from_worker(interval="5min", count=100, max_retries=3):
         else:
             df[col] = 0.0
 
+    print(
+        f"[MA'LUMOT MANBASI] cTrader'dan TASDIQLANDI: {len(df)} ta sham, "
+        f"oxirgisi={df.index[-1]}, oxirgi close={df['close'].iloc[-1]:.2f}"
+    )
     return df
 
 
