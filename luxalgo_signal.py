@@ -9,10 +9,11 @@ Mantiq (avvalgi smc_official signalimiz bilan bir xil tuzilma, lekin
 LuxAlgo'ning aniq FVG/Sweep algoritmlari bilan):
 
 1. Sweep (wick_sweep yoki outbreak_retest, LuxAlgo Liquidity Sweeps'dan)
-2. Undan KEYIN hosil bo'lgan, mos yo'nalishdagi FVG (LuxAlgo SMC'dan,
-   Auto Threshold + yopilish sharti bilan)
-3. Bir nechta sweep bir xil FVG'ga mos kelsa - ENG SO'NGGI (yangi) sweep
-   tanlanadi (eski sweep_lib'dagi tuzatishimiz bilan bir xil tamoyil)
+2. FAQAT ENG SO'NGGI (xronologik eng yangi) sweep ko'rib chiqiladi - undan
+   oldingi sweep'lar UMUMAN solishtirilmaydi (SMC nazariyasiga mos: sweep
+   va undan keyingi FVG bitta uzluksiz institutsional harakatning qismi)
+3. Undan KEYIN hosil bo'lgan, mos yo'nalishdagi, hali "yangi" (fresh_break_window
+   ichida) FVG (LuxAlgo SMC'dan, Auto Threshold + yopilish sharti bilan)
 4. BOS/CHoCH (LuxAlgo SMC'dan) - QO'SHIMCHA, majburiy emas
 """
 
@@ -20,14 +21,27 @@ from luxalgo_smc import detect_fvg, detect_bos_choch
 from luxalgo_liquidity_sweeps import detect_luxalgo_liquidity_sweeps
 
 
-def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5,
+def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=5,
                             sweep_mode="wicks_and_outbreak_retest", sl_buffer=0.20):
     """LuxAlgo Sweep+FVG signalini aniqlaydi.
 
     Qaytaradi: eski smc_official signal bilan bir xil tuzilmadagi lug'at
     (type, sweep_level, sweep_time, fvg_time, fvg_top, fvg_bottom,
     has_structure, structure_kind, current_close) - main.py'dagi mavjud
-    compute_sl_level/log_new_signal kodiga mos kelishi uchun."""
+    compute_sl_level/log_new_signal kodiga mos kelishi uchun.
+
+    MUHIM (144 -> 300): avval `lookback=144` edi, bu TwelveData'dan olinadigan
+    ma'lumot chegarasiga moslashtirib tanlangan son edi (texnik limit, strategik
+    tanlov emas). Endi cTrader (Worker) orqali 300 tagacha sham ishonchli
+    olinayotgani uchun, `lookback=300`ga oshirildi - bu ko'proq sweep/pivot
+    darajasini "ko'rish imkoniyati"ni beradi (eski darajalar ko'zdan chetda
+    qolmaydi). Bu XAVFSIZ, chunki eskirgan (uzoq muddatli) sweep+FVG
+    kombinatsiyalari alohida, `fresh_break_window` orqali (`cur`ga nisbatan)
+    rad etiladi - pastdagi find_signal() ichida, oyna kattaligidan qat'iy
+    nazar. FVG threshold esa (`detect_fvg`da) oynaning boshidan kumulyativ
+    o'rtacha asosida hisoblanadi - bu, oyna kattaligiga qarab, biroz farqli
+    sezgirlik berishi MUMKIN (yaxshi yoki yomon tomonga - buni bozor
+    ochilgach, 144 va 300 natijalarini solishtirib aniqlash tavsiya etiladi)."""
     sub = df.iloc[-lookback:].copy()
     if len(sub) < lookback:
         return None
@@ -47,42 +61,78 @@ def detect_luxalgo_signal(df, lookback=144, swing_length=6, fresh_break_window=5
 
         fvg_dir = direction  # FVG yo'nalishi sweep yo'nalishi bilan BIR XIL
         # (chunki bullish sweep = pastdagi trap/retest, undan keyin BULLISH FVG kutiladi)
-        best = None
-        rejected = []
-        # ENG YANGI sweep'dan boshlab tekshiramiz (eski sweep muammosidan qochish uchun)
-        for sw in reversed(candidates):
-            sweep_idx = sw["signal_idx"]
-            matching_fvgs = [f for f in fvgs if f["direction"] == fvg_dir
-                              and f["confirm_idx"] > sweep_idx
-                              and f["mitigated_idx"] is None]
-            if not matching_fvgs:
-                rejected.append(f"sweep@{sweep_idx}(lvl={sw['pivot_level']:.2f},{sw['kind']}) - keyin mos FVG yo'q")
-                continue
-            # SODDALASHTIRILDI: "eng yaxshisi"ni qidirmasdan, TOPILGAN BIRINCHI
-            # mos FVG bilan darhol signal beriladi (murakkab tanlov olib tashlandi)
-            fvg = matching_fvgs[0]
-            fvg_idx = fvg["confirm_idx"]
 
-            if fvg_idx < cur - fresh_break_window + 1:
-                rejected.append(f"sweep@{sweep_idx} + FVG@{fvg_idx} - ESKIRGAN (cur={cur})")
-                continue
+        # MUHIM TUZATISH (SMC nazariyasiga moslashtirildi, Jamshid tasdiqladi):
+        # avval BARCHA topilgan sweep'lar bo'yicha aylanib, ular orasidan
+        # "eng yangi FVG'li" kombinatsiya tanlanardi — bu esa, masalan,
+        # 250 sham oldingi ESKI bir sweep'ni ham, agar unga keyinroq (hozirgi
+        # vaqtga yaqin) biror FVG "tasodifan" mos kelib qolsa, signal deb
+        # olib qo'yishi mumkin edi. Bu SMC nazariyasiga zid: real bozorda
+        # sweep va undan keyingi FVG — BITTA uzluksiz institutsional
+        # harakatning (sweep -> impuls -> FVG) qismlari, ular orasida
+        # boshqa, aloqasi yo'q eski sweep'lar "aralashib" ketmasligi kerak.
+        # Endi: FAQAT eng so'nggi (candidates[-1], xronologik eng yangi)
+        # sweep ko'rib chiqiladi — undan oldingi sweep'lar UMUMAN
+        # solishtirilmaydi. Aniq masofa (necha sham) chegarasi hozircha
+        # ATAYLAB qo'yilmagan (Jamshid qarori) — faqat "eng so'nggi
+        # sweep'dan keyin" degan tartib talab qilinadi.
+        last_sweep = candidates[-1]
+        sweep_idx = last_sweep["signal_idx"]
 
-            best = {
-                "sweep_idx": sweep_idx,
-                "sweep_level": sw["pivot_level"],
-                "sweep_kind": sw["kind"],
-                "fvg_idx": fvg_idx,
-                "fvg_top": fvg["top"],
-                "fvg_bottom": fvg["bottom"],
-            }
-            break  # birinchi mos juftlik topildi - qidiruvni tox tatamiz
-
-        if best is None:
-            last_sweep = candidates[-1]
-            reason = (f"{len(candidates)} ta sweep topildi (eng so'nggisi: @{last_sweep['signal_idx']}, "
-                      f"lvl={last_sweep['pivot_level']:.2f}, {last_sweep['kind']}), lekin hech biri mos FVG "
-                      f"bilan bog'lanmadi. " + " | ".join(rejected[-3:]))
+        matching_fvgs = [f for f in fvgs if f["direction"] == fvg_dir
+                          and f["confirm_idx"] > sweep_idx
+                          and f["mitigated_idx"] is None]
+        if not matching_fvgs:
+            reason = (f"eng so'nggi sweep @{sweep_idx} (lvl={last_sweep['pivot_level']:.2f}, "
+                      f"{last_sweep['kind']}) topildi, lekin undan keyin mos FVG yo'q "
+                      f"(jami {len(candidates)} ta sweep bor edi, faqat eng so'nggisi tekshirildi)")
             return None, reason
+
+        fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
+        fvg_idx = fvg["confirm_idx"]
+
+        if fvg_idx < cur - fresh_break_window + 1:
+            reason = (f"eng so'nggi sweep @{sweep_idx} + FVG @{fvg_idx} - ESKIRGAN "
+                      f"(cur={cur}, fresh_break_window={fresh_break_window})")
+            return None, reason
+
+        # MUHIM TUZATISH (SMC izchilligi, Jamshid tasdiqladi): FVG sweep
+        # ZONASINING ichida (yoki undan yuqorida/pastida, yo'nalishga qarab)
+        # bo'lishi kifoya — FVG zona ichida bo'lishi NORMAL (narx sweep'dan
+        # keyin darhol ketmasdan, o'sha zonada biroz turib, keyin harakatga
+        # o'tishi mumkin). Faqat FVG butun zonaning ENG CHETKI chegarasidan
+        # (bullish uchun `sweep_area_bottom` — narx haqiqatda eng qancha
+        # pastga tushgani, `pivot_level`dan farqli) TASHQARIDA bo'lsa —
+        # bu, sweep bilan FVG orasida haqiqiy aloqa yo'qligini bildiradi,
+        # rad etiladi. `sweep_area_top/bottom` allaqachon
+        # `luxalgo_liquidity_sweeps.py`da hisoblab beriladi (LuxAlgo asl
+        # mantig'idagi "Sweep Area"), shuning uchun u yerga tegilmadi —
+        # faqat shu yerda, moslashtirish bosqichida ishlatilyapti.
+        if direction == "bullish":
+            if fvg["bottom"] < last_sweep["sweep_area_bottom"]:
+                reason = (
+                    f"eng so'nggi sweep @{sweep_idx} + FVG @{fvg_idx} - FVG sweep "
+                    f"ZONASIDAN TASHQARIDA (fvg_bottom={fvg['bottom']:.2f} < "
+                    f"sweep_area_bottom={last_sweep['sweep_area_bottom']:.2f})"
+                )
+                return None, reason
+        else:  # bearish
+            if fvg["top"] > last_sweep["sweep_area_top"]:
+                reason = (
+                    f"eng so'nggi sweep @{sweep_idx} + FVG @{fvg_idx} - FVG sweep "
+                    f"ZONASIDAN TASHQARIDA (fvg_top={fvg['top']:.2f} > "
+                    f"sweep_area_top={last_sweep['sweep_area_top']:.2f})"
+                )
+                return None, reason
+
+        best = {
+            "sweep_idx": sweep_idx,
+            "sweep_level": last_sweep["pivot_level"],
+            "sweep_kind": last_sweep["kind"],
+            "fvg_idx": fvg_idx,
+            "fvg_top": fvg["top"],
+            "fvg_bottom": fvg["bottom"],
+        }
 
         has_structure = False
         structure_kind = None
