@@ -1569,7 +1569,11 @@ def main():
     interval = sys.argv[2] if len(sys.argv) > 2 else "5min"
 
     try:
-        candles_df = get_gold_candles(interval=interval, outputsize=150)
+        # 150 -> 300: cTrader (Worker) manbasiga o'tilgani sababli endi TwelveData
+        # limitiga bog'liq emasmiz (worker 1000 tagacha qo'llab-quvvatlaydi,
+        # 300 allaqachon sinovdan o'tgan). Ko'proq tarixiy sham -> SMC/Wyckoff
+        # tahlili uchun kengroq kontekst.
+        candles_df = get_gold_candles(interval=interval, outputsize=300)
     except Exception as e:
         send_telegram_message(f"⚠️ Sveча ma'lumotini olishda xatolik ({interval}): {e}")
         sys.exit(1)
