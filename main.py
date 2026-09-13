@@ -260,7 +260,10 @@ def get_forex_calendar_events(hours_ahead=24, max_retries=2):
 # (~1000 signaldan <1% ishlagan, amalda ishlamagan). Yangi jackpot (range
 # detector + Wyckoff spring/upthrust + FVG) alohida quriladi - tayyor
 # bo'lgach, shu yerga qayta ulanadi.
-from jackpot_signal import find_swing_points, detect_ob_fvg_entry, detect_jackpot_signal
+# OB/FVG va JACKPOT - ALOHIDA fayllarda (2026-09-12: bir-biriga aloqasi
+# yo'q mustaqil strategiyalar bo'lgani uchun bo'lib tashlandi):
+from ob_fvg_signal import find_swing_points, detect_ob_fvg_entry
+from jackpot_signal import detect_jackpot_signal
 from luxalgo_signal import detect_luxalgo_signal
 
 
