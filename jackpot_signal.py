@@ -1,33 +1,42 @@
 """
 jackpot_signal.py
 
-Moslashuvchan (istalgan uzunlikdagi) range aniqlash, Spring/Upthrust va
-"JACKPOT" (Spring/Upthrust + Test) signal mantiqi.
+Ikkita signal turi:
+1. detect_ob_fvg_entry - Sweep + FVG + BOS asosidagi OB/FVG kirish strategiyasi
+2. detect_jackpot_signal - YANGI (2026-09-12): Range (luxalgo_range_detector) +
+   Spring/Upthrust (wyckoff_spring_upthrust) + FVG (luxalgo_smc) birlashtirilgan
+   "JACKPOT" signali.
 
-Bu fayl main.py'dan mustaqil — faqat pandas DataFrame (OHLC ustunlari bilan)
-qabul qiladi, hech qanday tashqi API yoki Telegram bilan ishlamaydi. Shu
-sababli, alohida sinash/sozlash oson: bu faylni o'zgartirib, natijasini
-sinab ko'rish uchun main.py yoki botni ishga tushirish shart emas.
+ESLATMA (2026-09-12): eski `detect_dynamic_range`, `detect_dynamic_spring_upthrust`
+va `detect_jackpot_signal` (teng cho'qqi/tub klasterlash asosida) ~1000 ta
+yig'ilgan signal ichida <1% chastota bilan ishlagani (amalda ishlamagani)
+sababli OLIB TASHLANDI va yuqoridagi yangi arxitektura bilan ALMASHTIRILDI.
+
+Yangi `detect_jackpot_signal` HAM eski bilan bir xil `"jackpot_spring"`/
+`"jackpot_upthrust"` nomi va `event_low`/`event_high`/`range_high`/`range_low`
+maydonlari bilan qaytariladi - shunda main.py'dagi SL/TP/yo'nalish/dedup
+mantig'i (`compute_sl_level` va h.k.) HECH QANDAY o'zgarishisiz ishlaydi.
 
 main.py bu fayldan quyidagilarni import qiladi:
-    from jackpot_signal import (
-        RANGE_TOLERANCE_PCT, CONFIRM_CANDLES, TEST_TOLERANCE_PCT, TEST_SEARCH_WINDOW,
-        find_swing_points, cluster_equal_levels, detect_dynamic_range,
-        detect_dynamic_spring_upthrust, detect_jackpot_signal,
-    )
+    from jackpot_signal import find_swing_points, detect_ob_fvg_entry, detect_jackpot_signal
 """
+
+import numpy as np
+
+from luxalgo_range_detector import detect_luxalgo_range
+from wyckoff_spring_upthrust import detect_wyckoff_springs, detect_wyckoff_upthrusts
+from luxalgo_smc import detect_fvg
 
 # ============================================================================
 # SOZLAMALAR
 # ============================================================================
 
-RANGE_TOLERANCE_PCT = 0.3   # "teng" cho'qqi/tub deb hisoblash uchun ruxsat etilgan farq (%)
-CONFIRM_CANDLES = 2         # range'ga qaytgandan keyin tasdiqlash uchun kutiladigan sveчalar soni
-TEST_TOLERANCE_PCT = 0.15   # "test" darajaga qanchalik yaqin kelishi kerak
-TEST_SEARCH_WINDOW = 30     # test candidatidan oldin, sweep voqeasini qidirish oynasi
 PROMINENCE_WINDOW = 40      # Sweep uchun: "ajralib turgan" darajani aniqlash oynasi
-PROMINENCE_MIN_HISTORY = 10  # ishonchli referens uchun kamida shuncha oldingi sveчa kerak
+PROMINENCE_MIN_HISTORY = 10  # ishonchli referens uchun kamida shuncha oldingi sveцha kerak
 BOS_SWING_WINDOW = 6        # BOS uchun: eng yaqin tasdiqlangan swing nuqta oynasi
+EVENT_SEARCH_WINDOW = 3     # "voqea" (event/test) uchun oxirgi nechta sveцhani tekshirish
+                            # (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli
+                            # bo'lish uchun)
 
 
 # ============================================================================
@@ -48,311 +57,6 @@ def find_swing_points(highs, lows, window=3, exclude_last=True):
         if lows[i] == lows[lo:hi].min():
             swing_low_idx.append(i)
     return swing_high_idx, swing_low_idx
-
-
-# ============================================================================
-# MOSLASHUVCHAN RANGE ("TENG CHO'QQI/TUB" ASOSIDA)
-# ============================================================================
-
-def cluster_equal_levels(points, tolerance_pct, min_span=10, mode="high"):
-    """points: [(indeks, narx), ...]. Bir-biriga tolerance_pct ichida yaqin narxlarni
-    guruhlaydi ("teng cho'qqi/tub"). Faqat vaqt bo'yicha yetarlicha uzoq tarqalgan
-    (min_span sveчadan ko'p) guruhlarni qaytaradi — bu tasodifiy, yaqin-orada
-    joylashgan shovqinni chinakam qayta-qayta sinalgan darajadan ajratadi.
-
-    Chegara sifatida GURUHDAGI ENG EKSTREMAL nuqta olinadi (o'rtacha emas):
-    mode='high' -> guruhdagi eng YUQORI narx (haqiqiy sinalgan resistance)
-    mode='low'  -> guruhdagi eng PAST narx (haqiqiy sinalgan support)
-    """
-    points = sorted(points, key=lambda p: p[1])
-    clusters = []
-    used = [False] * len(points)
-
-    for i in range(len(points)):
-        if used[i]:
-            continue
-        group = [points[i]]
-        used[i] = True
-        for j in range(i + 1, len(points)):
-            if used[j]:
-                continue
-            avg_so_far = sum(v for _, v in group) / len(group)
-            if avg_so_far == 0:
-                continue
-            if abs(points[j][1] - avg_so_far) / avg_so_far * 100 <= tolerance_pct:
-                group.append(points[j])
-                used[j] = True
-        indices = [idx for idx, _ in group]
-        if len(group) >= 2 and (max(indices) - min(indices)) >= min_span:
-            values = [v for _, v in group]
-            level = max(values) if mode == "high" else min(values)
-            clusters.append({"level": level, "indices": indices})
-    return clusters
-
-
-def is_level_respected(highs, lows, lo_idx, hi_idx, level, tolerance_pct, mode):
-    """Ikki nuqta orasidagi BARCHA sveчalarni tekshiradi — agar ulardan birortasi
-    ham chegarani (tolerantlikdan tashqari) buzgan bo'lsa, bu range 'haqiqiy emas'
-    deb hisoblanadi (ya'ni ikki nuqta orasida narx allaqachon chegaradan chiqib
-    ketgan bo'lsa, ular 'range chegarasi' bo'la olmaydi)."""
-    if level == 0:
-        return False
-    segment = highs[lo_idx:hi_idx + 1] if mode == "high" else lows[lo_idx:hi_idx + 1]
-    if mode == "high":
-        extreme = segment.max()
-        return (extreme - level) / level * 100 <= tolerance_pct
-    extreme = segment.min()
-    return (level - extreme) / level * 100 <= tolerance_pct
-
-
-def detect_dynamic_range(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT):
-    """Qattiq sveчa soniga bog'lanmasdan, 'teng cho'qqilar' va 'teng tublar' asosida
-    range chegaralarini topadi — range necha sveчa davom etgani muhim emas."""
-    if len(df) < lookback:
-        return None
-
-    sub = df.iloc[-lookback:]
-    highs = sub["high"].values
-    lows = sub["low"].values
-
-    swing_high_idx, swing_low_idx = find_swing_points(highs, lows, window=swing_window, exclude_last=True)
-    if not swing_high_idx or not swing_low_idx:
-        return None
-
-    high_clusters = cluster_equal_levels([(i, highs[i]) for i in swing_high_idx], tolerance_pct, mode="high")
-    low_clusters = cluster_equal_levels([(i, lows[i]) for i in swing_low_idx], tolerance_pct, mode="low")
-    if not high_clusters or not low_clusters:
-        return None
-
-    # Eng so'nggidan boshlab, HAQIQATAN ushlab turilgan (orasida buzilmagan) cluster'ni qidiramiz
-    best_high = None
-    for c in sorted(high_clusters, key=lambda c: max(c["indices"]), reverse=True):
-        lo_idx, hi_idx = min(c["indices"]), max(c["indices"])
-        if is_level_respected(highs, lows, lo_idx, hi_idx, c["level"], tolerance_pct, "high"):
-            best_high = c
-            break
-    if best_high is None:
-        return None
-
-    best_low = None
-    for c in sorted(low_clusters, key=lambda c: max(c["indices"]), reverse=True):
-        lo_idx, hi_idx = min(c["indices"]), max(c["indices"])
-        if is_level_respected(highs, lows, lo_idx, hi_idx, c["level"], tolerance_pct, "low"):
-            best_low = c
-            break
-    if best_low is None:
-        return None
-
-    range_high = best_high["level"]
-    range_low = best_low["level"]
-    if range_high <= range_low:
-        return None
-
-    range_start_idx = min(min(best_high["indices"]), min(best_low["indices"]))
-
-    return {"range_high": range_high, "range_low": range_low, "range_start_idx": range_start_idx}
-
-
-# ============================================================================
-# ODDIY SPRING / UPTHRUST (moslashuvchan range, davomiylik bilan tasdiqlangan)
-# ============================================================================
-
-EVENT_SEARCH_WINDOW = 3  # "voqea" (event/test) uchun oxirgi nechta sveцhani tekshirish
-                         # (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli
-                         # bo'lish uchun)
-
-
-def detect_dynamic_spring_upthrust(df, swing_window=6, lookback=144,
-                                     tolerance_pct=RANGE_TOLERANCE_PCT, confirm_candles=CONFIRM_CANDLES,
-                                     event_search_window=EVENT_SEARCH_WINDOW):
-    """Moslashuvchan range'ga sweep qilib qaytgandan keyin, davomida narx shu
-    yo'nalishda davom etsa, signal beradi. Har voqea faqat bir marta xabar
-    qilinadi (dedup - main.py'dagi event_key orqali).
-
-    Voqea (event) joriy vaqtdan `confirm_candles` oldingi ANIQ bitta nuqtada
-    emas, balki so'nggi `event_search_window` sveцha ichidagi ISTALGAN nuqtada
-    bo'lishi mumkin — bu bitta o'tkazib yuborilgan tekshiruvga (masalan tarmoq
-    xatoligi tufayli) chidamli qiladi. Tasdiqlash — voqeadan joriy svechagacha
-    BARCHA oraliq svechalar davom etganini tekshiradi (aniq confirm_candles
-    sonida emas, balki qancha bo'lsa ham)."""
-    range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
-    if range_info is None:
-        return None
-
-    sub = df.iloc[-lookback:]
-    highs = sub["high"].values
-    lows = sub["low"].values
-    closes = sub["close"].values
-    times = sub.index
-    n = len(sub)
-    cur = n - 1
-
-    range_high = range_info["range_high"]
-    range_low = range_info["range_low"]
-
-    earliest_event = max(swing_window, cur - confirm_candles - event_search_window + 1)
-    latest_event = cur - confirm_candles
-    if latest_event < earliest_event:
-        return None
-
-    # SPRING: eng erta (eng ishonchli) voqeadan boshlab qidiramiz
-    for event_idx in range(earliest_event, latest_event + 1):
-        if lows[event_idx] < range_low and closes[event_idx] > range_low:
-            entry_close = closes[event_idx]
-            if all(closes[k] >= entry_close for k in range(event_idx + 1, cur + 1)) and closes[cur] > entry_close:
-                return {
-                    "type": "dynamic_spring",
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "event_time": str(times[event_idx]),
-                    "event_low": lows[event_idx],
-                    "event_close": entry_close,
-                    "current_close": closes[cur],
-                }
-
-    # UPTHRUST: teskarisi
-    for event_idx in range(earliest_event, latest_event + 1):
-        if highs[event_idx] > range_high and closes[event_idx] < range_high:
-            entry_close = closes[event_idx]
-            if all(closes[k] <= entry_close for k in range(event_idx + 1, cur + 1)) and closes[cur] < entry_close:
-                return {
-                    "type": "dynamic_upthrust",
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "event_time": str(times[event_idx]),
-                    "event_high": highs[event_idx],
-                    "event_close": entry_close,
-                    "current_close": closes[cur],
-                }
-
-    return None
-
-
-# ============================================================================
-# 🎰 JACKPOT — Spring/Upthrust + TEST (eng yuqori ishonchli signal)
-# ============================================================================
-
-PRE_RANGE_LOOKBACK = 20      # range boshlanishidan oldin necha sveчa tekshiriladi
-PRE_RANGE_MIN_MOVE_MULT = 1.0  # oldingi harakat range balandligining necha barobari bo'lishi kerak
-
-
-def check_pre_range_movement(sub, range_start_idx, range_height,
-                               lookback_candles=PRE_RANGE_LOOKBACK, min_move_mult=PRE_RANGE_MIN_MOVE_MULT):
-    """Range paydo bo'lishidan OLDIN narx haqiqiy harakat qilganini tekshiradi
-    (yo'nalishidan qat'iy nazar) — butunlay tekis, harakatsiz joydan chiqqan
-    'range'larni rad etadi. Bu Wyckoff akkumulyatsiya/distribution'ning haqiqiy
-    bo'lishi uchun muhim shart: range'dan oldin narx qayerdandir kelgan bo'lishi kerak."""
-    if range_start_idx <= 0 or range_height <= 0:
-        return True  # ma'lumot yetarli emas - xavfsiz tomonga, filtrlamaymiz
-
-    start = max(0, range_start_idx - lookback_candles)
-    pre_segment = sub.iloc[start:range_start_idx]
-    if pre_segment.empty:
-        return True
-
-    pre_move = pre_segment["high"].max() - pre_segment["low"].min()
-    return pre_move >= range_height * min_move_mult
-
-
-def detect_jackpot_signal(df, swing_window=6, lookback=144, tolerance_pct=RANGE_TOLERANCE_PCT,
-                            test_tolerance_pct=TEST_TOLERANCE_PCT, test_window=TEST_SEARCH_WINDOW,
-                            confirm_candles=CONFIRM_CANDLES, event_search_window=EVENT_SEARCH_WINDOW):
-    """🎰 JACKPOT — eng yuqori ishonchli signal: klassik Wyckoff 'Spring + Test'
-    (yoki 'Upthrust + Test') pattern'i:
-
-    1. Range chegarasidan soxta chiqib qaytadi (sweep)
-    2. Keyinroq narx o'sha darajaga QAYTIB KELIB, uni TEST QILADI (buzmasdan ushlab turadi)
-    3. Test'dan keyin narx keskin TESKARI tomonga ketadi — signal shu yerda beriladi
-
-    Bu — oddiy sweep+return'dan farqli, qo'shimcha 'test' bosqichi bilan tasdiqlangan,
-    shuning uchun kamroq, lekin ancha ishonchliroq signal beradi.
-
-    Qo'shimcha filtr: range paydo bo'lishidan oldin haqiqiy narx harakati bo'lgan
-    bo'lishi kerak (tekis, harakatsiz joydan chiqqan range'lar rad etiladi).
-
-    Test — joriy vaqtdan `confirm_candles` oldingi ANIQ bitta nuqtada emas, balki
-    so'nggi `event_search_window` sveцha ichidagi ISTALGAN nuqtada bo'lishi mumkin
-    (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli bo'lish uchun)."""
-    range_info = detect_dynamic_range(df, swing_window, lookback, tolerance_pct)
-    if range_info is None:
-        return None
-
-    sub = df.iloc[-lookback:]
-    highs = sub["high"].values
-    lows = sub["low"].values
-    closes = sub["close"].values
-    times = sub.index
-    n = len(sub)
-    cur = n - 1
-
-    range_high = range_info["range_high"]
-    range_low = range_info["range_low"]
-
-    if not check_pre_range_movement(sub, range_info["range_start_idx"], range_high - range_low):
-        return None
-
-    earliest_test = max(swing_window, cur - confirm_candles - event_search_window + 1)
-    latest_test = cur - confirm_candles
-    if latest_test < earliest_test:
-        return None
-
-    # --- SPRING + TEST (bullish) ---
-    for test_idx in range(earliest_test, latest_test + 1):
-        if range_low <= 0:
-            break
-        if abs(lows[test_idx] - range_low) / range_low * 100 > test_tolerance_pct:
-            continue
-        if closes[test_idx] <= range_low:
-            continue
-        search_start = max(swing_window, test_idx - test_window)
-        event_idx = None
-        for k in range(search_start, test_idx):
-            if lows[k] < range_low and closes[k] > range_low:
-                event_idx = k  # eng so'nggi (test'ga eng yaqin) sweep voqeasi
-        if event_idx is None:
-            continue
-        test_close = closes[test_idx]
-        if all(closes[k] >= test_close for k in range(test_idx + 1, cur + 1)) and closes[cur] > test_close:
-            return {
-                "type": "jackpot_spring",
-                "range_high": range_high,
-                "range_low": range_low,
-                "event_time": str(times[event_idx]),
-                "event_low": lows[event_idx],
-                "test_time": str(times[test_idx]),
-                "test_low": lows[test_idx],
-                "current_close": closes[cur],
-            }
-
-    # --- UPTHRUST + TEST (bearish) ---
-    for test_idx in range(earliest_test, latest_test + 1):
-        if range_high <= 0:
-            break
-        if abs(highs[test_idx] - range_high) / range_high * 100 > test_tolerance_pct:
-            continue
-        if closes[test_idx] >= range_high:
-            continue
-        search_start = max(swing_window, test_idx - test_window)
-        event_idx = None
-        for k in range(search_start, test_idx):
-            if highs[k] > range_high and closes[k] < range_high:
-                event_idx = k
-        if event_idx is None:
-            continue
-        test_close = closes[test_idx]
-        if all(closes[k] <= test_close for k in range(test_idx + 1, cur + 1)) and closes[cur] < test_close:
-            return {
-                "type": "jackpot_upthrust",
-                "range_high": range_high,
-                "range_low": range_low,
-                "event_time": str(times[event_idx]),
-                "event_high": highs[event_idx],
-                "test_time": str(times[test_idx]),
-                "test_high": highs[test_idx],
-                "current_close": closes[cur],
-            }
-
-    return None
 
 
 # ============================================================================
@@ -555,5 +259,100 @@ def detect_ob_fvg_entry(df, lookback=144, min_fvg_mult=0.5, min_sweep_mult=0.15,
                         "zone_bottom": zone_bottom,
                         "entry_close": closes[cur],
                     }
+
+    return None
+
+
+# ============================================================================
+# 🎰 JACKPOT (YANGI, 2026-09-12) — Range + Spring/Upthrust + FVG
+# ============================================================================
+#
+# Zanjir:
+#   1. luxalgo_range_detector.detect_luxalgo_range -> range (box_top/box_bottom)
+#   2. wyckoff_spring_upthrust.detect_wyckoff_springs/upthrusts, LEKIN
+#      external_level_series orqali - o'zining pivot qidiruvi EMAS, balki
+#      bizning range chegaramiz (1-qadamdan) "daraja" sifatida ishlatiladi
+#   3. Spring/Upthrust tasdiqlangach, luxalgo_smc.detect_fvg orqali, TO'G'RI
+#      yo'nalishdagi (spring->bullish, upthrust->bearish), "yangi" (ko'p
+#      uzoqlashmagan) FVG qidiriladi - xuddi luxalgo_signal.py'dagi kabi
+#
+# MUHIM: natija ESKI nom/maydonlar bilan qaytariladi ("jackpot_spring"/
+# "jackpot_upthrust", event_low/event_high, range_high/range_low) - shunda
+# main.py'dagi SL/TP/yo'nalish/dedup mantig'i o'zgarishisiz ishlaydi.
+# Qo'shimcha: fvg_top/fvg_bottom (grafikda belgilash uchun, va kelajakda
+# TP hisoblashda ishlatilishi mumkin).
+
+JACKPOT_MAX_SPRING_ATTEMPTS = 3   # Spring/Upthrust uchun max muvaffaqiyatsiz urinish
+JACKPOT_FRESH_FVG_WINDOW = 5      # FVG spring/upthrust'dan keyin "qancha uzoqlashishi" mumkin
+
+
+def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, range_atr_len=500,
+                            max_spring_attempts=JACKPOT_MAX_SPRING_ATTEMPTS,
+                            fresh_fvg_window=JACKPOT_FRESH_FVG_WINDOW):
+    """YANGI JACKPOT: Range + Spring/Upthrust + FVG.
+
+    Qaytaradi (topilsa): eski JACKPOT bilan bir xil asosiy maydonlar
+    (type, range_high, range_low, event_time, event_low/event_high,
+    current_close) + YANGI: fvg_time, fvg_top, fvg_bottom."""
+    if len(df) < lookback:
+        return None
+
+    sub = df.iloc[-lookback:].copy()
+    n = len(sub)
+    cur = n - 1
+    closes = sub["close"].to_numpy(dtype=float)
+    times = sub.index
+
+    range_states = detect_luxalgo_range(sub, length=range_length, mult=range_mult, atr_len=range_atr_len)
+    box_bottom_series = [r["box_bottom"] if r["box_bottom"] is not None else float("nan") for r in range_states]
+    box_top_series = [r["box_top"] if r["box_top"] is not None else float("nan") for r in range_states]
+
+    fvgs = detect_fvg(sub, auto_threshold=True)
+
+    # --- SPRING (bullish) ---
+    springs = detect_wyckoff_springs(sub, external_level_series=box_bottom_series,
+                                       max_attempts=max_spring_attempts)
+    if springs:
+        last_spring = springs[-1]
+        matching_fvgs = [f for f in fvgs if f["direction"] == "bullish"
+                          and f["confirm_idx"] > last_spring["confirm_idx"]]
+        if matching_fvgs:
+            fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
+            if fvg["confirm_idx"] >= cur - fresh_fvg_window + 1:
+                event_idx = last_spring["confirm_idx"]
+                return {
+                    "type": "jackpot_spring",
+                    "range_high": box_top_series[event_idx] if not np.isnan(box_top_series[event_idx]) else None,
+                    "range_low": last_spring["pivot_level"],
+                    "event_time": str(times[event_idx]),
+                    "event_low": sub["low"].iloc[event_idx],
+                    "current_close": closes[cur],
+                    "fvg_time": str(times[fvg["confirm_idx"]]),
+                    "fvg_top": fvg["top"],
+                    "fvg_bottom": fvg["bottom"],
+                }
+
+    # --- UPTHRUST (bearish) ---
+    upthrusts = detect_wyckoff_upthrusts(sub, external_level_series=box_top_series,
+                                           max_attempts=max_spring_attempts)
+    if upthrusts:
+        last_upthrust = upthrusts[-1]
+        matching_fvgs = [f for f in fvgs if f["direction"] == "bearish"
+                          and f["confirm_idx"] > last_upthrust["confirm_idx"]]
+        if matching_fvgs:
+            fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
+            if fvg["confirm_idx"] >= cur - fresh_fvg_window + 1:
+                event_idx = last_upthrust["confirm_idx"]
+                return {
+                    "type": "jackpot_upthrust",
+                    "range_high": last_upthrust["pivot_level"],
+                    "range_low": box_bottom_series[event_idx] if not np.isnan(box_bottom_series[event_idx]) else None,
+                    "event_time": str(times[event_idx]),
+                    "event_high": sub["high"].iloc[event_idx],
+                    "current_close": closes[cur],
+                    "fvg_time": str(times[fvg["confirm_idx"]]),
+                    "fvg_top": fvg["top"],
+                    "fvg_bottom": fvg["bottom"],
+                }
 
     return None
