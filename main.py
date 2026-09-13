@@ -1288,7 +1288,7 @@ def run_signal_check(df, price_data, interval="5min"):
     # Telegram/Gist orqali KUZATISH uchun. Sinovdan o'tgach, Worker'ga ham
     # ulanadi (is_smc_signal ro'yxatiga qo'shiladi).
     jackpot = detect_jackpot_signal(df, lookback=300)
-    ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=144)
+    ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=300)
     # 🔥 SMC signal endi 'smartmoneyconcepts' (LuxAlgo'dan portlangan, sinalgan)
     # kutubxonasi asosida - BOS va CHoCH'ni aniq, pattern-matching orqali ajratadi
     smc = None if (jackpot or ob_fvg) else detect_luxalgo_signal(df, lookback=300)
