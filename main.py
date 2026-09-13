@@ -254,13 +254,13 @@ def get_forex_calendar_events(hours_ahead=24, max_retries=2):
 # QOIDA DVIGATELI - Wyckoff Spring / Upthrust / Range holati
 # ============================================================================
 
-# JACKPOT, moslashuvchan range va Spring/Upthrust mantiqi alohida faylda
-# (jackpot_signal.py) - shu yerdan import qilinadi:
-from jackpot_signal import (
-    RANGE_TOLERANCE_PCT, CONFIRM_CANDLES, TEST_TOLERANCE_PCT, TEST_SEARCH_WINDOW,
-    find_swing_points, cluster_equal_levels, detect_dynamic_range,
-    detect_dynamic_spring_upthrust, detect_jackpot_signal, detect_ob_fvg_entry,
-)
+# OB/FVG strategiyasi alohida faylda (jackpot_signal.py) - shu yerdan import
+# qilinadi. ESLATMA (2026-09-12): eski `detect_dynamic_range`,
+# `detect_dynamic_spring_upthrust`, `detect_jackpot_signal` OLIB TASHLANDI
+# (~1000 signaldan <1% ishlagan, amalda ishlamagan). Yangi jackpot (range
+# detector + Wyckoff spring/upthrust + FVG) alohida quriladi - tayyor
+# bo'lgach, shu yerga qayta ulanadi.
+from jackpot_signal import find_swing_points, detect_ob_fvg_entry, detect_jackpot_signal
 from luxalgo_signal import detect_luxalgo_signal
 
 
@@ -596,7 +596,8 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 # ============================================================================
 
 def make_chart_image(df, path="/tmp/chart.png", interval="5min",
-                      sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None):
+                      sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None,
+                      range_high=None, range_low=None, event_label="Sweep"):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
     Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
     'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
@@ -604,7 +605,11 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
     rasmni "ideal"roq ko'rsatadi.
 
     Agar sweep_level va/yoki fvg_top/fvg_bottom berilsa - ular grafikda
-    chiziqlar/soyali zona sifatida ko'rsatiladi (aniq narx yorlig'i bilan)."""
+    chiziqlar/soyali zona sifatida ko'rsatiladi (aniq narx yorlig'i bilan).
+    `event_label` - sweep_level chizig'ining yorlig'i (masalan JACKPOT uchun
+    "Spring past"/"Upthrust yuqori" - standart holatda "Sweep").
+    `range_high`/`range_low` berilsa (JACKPOT uchun) - range CHEGARASI ham
+    soyali zona sifatida (FVG'dan boshqa rangda) chiziladi."""
     import mplfinance as mpf
 
     plot_df = df.copy()
@@ -628,7 +633,8 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
         rc={"font.size": 11, "axes.labelsize": 12, "axes.titlesize": 14},
     )
 
-    has_overlay = sweep_level is not None or (fvg_top is not None and fvg_bottom is not None)
+    has_overlay = (sweep_level is not None or (fvg_top is not None and fvg_bottom is not None)
+                   or (range_high is not None and range_low is not None))
 
     fig, axlist = mpf.plot(
         plot_df,
@@ -650,6 +656,11 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
         # bullish: sweep past darajada (qizil - "buzilgan qollab-quvvatlash"),
         # FVG kirish zonasi (yashil). bearish - teskarisi.
 
+        if range_high is not None and range_low is not None:
+            ax.axhspan(range_low, range_high, color="#607d8b", alpha=0.12, zorder=-1)
+            ax.text(len(plot_df) * 0.01, range_high, f"Range {range_low:.2f}-{range_high:.2f}",
+                    color="#455a64", fontsize=10, va="bottom", fontweight="bold")
+
         if fvg_top is not None and fvg_bottom is not None:
             ax.axhspan(fvg_bottom, fvg_top, color=fvg_color, alpha=0.18, zorder=0)
             ax.text(len(plot_df) * 0.01, fvg_top, f"FVG {fvg_bottom:.2f}-{fvg_top:.2f}",
@@ -657,7 +668,7 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
 
         if sweep_level is not None:
             ax.axhline(sweep_level, color=sweep_color, linestyle="--", linewidth=1.5, zorder=1)
-            ax.text(len(plot_df) * 0.01, sweep_level, f"Sweep {sweep_level:.2f}",
+            ax.text(len(plot_df) * 0.01, sweep_level, f"{event_label} {sweep_level:.2f}",
                     color=sweep_color, fontsize=10, va="bottom", fontweight="bold")
 
     fig.savefig(path, dpi=220, bbox_inches="tight")
@@ -1268,31 +1279,21 @@ def is_market_transition_buffer(now_utc, buffer_minutes=60):
 
 
 def run_signal_check(df, price_data, interval="5min"):
-    # Eng kuchli signal birinchi tekshiriladi — agar u chiqsa, boshqalar tekshirilmaydi
-    jackpot = detect_jackpot_signal(df, lookback=144)
+    # YANGI JACKPOT (2026-09-12): Range+Spring/Upthrust+FVG. Eng kuchli signal
+    # sifatida birinchi tekshiriladi. MUHIM: pastdagi is_smc_signal tekshiruvi
+    # tufayli, bu ALLAQACHON Worker'ga (haqiqiy savdoga) YUBORILMAYDI - faqat
+    # Telegram/Gist orqali KUZATISH uchun. Sinovdan o'tgach, Worker'ga ham
+    # ulanadi (is_smc_signal ro'yxatiga qo'shiladi).
+    jackpot = detect_jackpot_signal(df, lookback=300)
     ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=144)
     # 🔥 SMC signal endi 'smartmoneyconcepts' (LuxAlgo'dan portlangan, sinalgan)
     # kutubxonasi asosida - BOS va CHoCH'ni aniq, pattern-matching orqali ajratadi
-    # MUHIM: lookback 144->300 (bugungi tekshiruv/kelishuv asosida - cTrader/Worker
-    # manbasiga o'tilgani uchun endi 300 ta sham ishonchli olinadi). FAQAT shu
-    # signal turi uchun - jackpot/ob_fvg/dynamic (pastda) ALOHIDA strategiyalar,
-    # ularga bugun tegilmadi, 144'da qoldirildi.
     smc = None if (jackpot or ob_fvg) else detect_luxalgo_signal(df, lookback=300)
-    dynamic = None if (jackpot or ob_fvg or smc) else detect_dynamic_spring_upthrust(df, lookback=144)
-    signal = jackpot or ob_fvg or smc or dynamic
+    signal = jackpot or ob_fvg or smc
 
     if not signal:
-        # DEBUG: range topilgan-topilmaganini va joriy narxni logga yozib chiqaramiz -
-        # bu signal nega chiqmaganini keyinroq aniq tahlil qilish uchun kerak
-        range_info = detect_dynamic_range(df, lookback=144)
         last_close = df["close"].iloc[-1]
-        if range_info:
-            print(f"[{interval}] Signal yo'q. Range topildi: "
-                  f"{range_info['range_low']:.2f} - {range_info['range_high']:.2f}, "
-                  f"joriy narx: {last_close:.2f}")
-        else:
-            print(f"[{interval}] Signal yo'q. Range topilmadi (teng cho'qqi/tub yo'q), "
-                  f"joriy narx: {last_close:.2f}")
+        print(f"[{interval}] Signal yo'q. joriy narx: {last_close:.2f}")
         return
 
     if is_duplicate_signal(signal, interval):
@@ -1307,6 +1308,19 @@ def run_signal_check(df, price_data, interval="5min"):
         return
 
     chart_sweep = signal.get("sweep_level")
+    chart_event_label = "Sweep"
+    chart_range_high = None
+    chart_range_low = None
+    if signal["type"] == "jackpot_spring":
+        chart_sweep = signal.get("event_low")
+        chart_event_label = "Spring past"
+        chart_range_high = signal.get("range_high")
+        chart_range_low = signal.get("range_low")
+    elif signal["type"] == "jackpot_upthrust":
+        chart_sweep = signal.get("event_high")
+        chart_event_label = "Upthrust yuqori"
+        chart_range_high = signal.get("range_high")
+        chart_range_low = signal.get("range_low")
     chart_fvg_top = signal.get("fvg_top")
     chart_fvg_bottom = signal.get("fvg_bottom")
     chart_direction = "bullish" if signal["type"] in (
@@ -1315,7 +1329,8 @@ def run_signal_check(df, price_data, interval="5min"):
     chart_path = make_chart_image(
         df.tail(150), interval=interval,
         sweep_level=chart_sweep, fvg_top=chart_fvg_top, fvg_bottom=chart_fvg_bottom,
-        direction=chart_direction,
+        direction=chart_direction, range_high=chart_range_high, range_low=chart_range_low,
+        event_label=chart_event_label,
     )
 
     tf_tag = f"[{interval}]"
@@ -1352,21 +1367,27 @@ def run_signal_check(df, price_data, interval="5min"):
             htf_zone_info = f"\nℹ️ 1H {'/'.join(types_found)} zonasida"
 
     if signal["type"] == "jackpot_spring":
-        emoji, label = "🎰🟢", f"{tf_tag} JACKPOT: Spring + Test (BULLISH)"
+        emoji, label = "🎰🟢", f"{tf_tag} JACKPOT: Spring + FVG (BULLISH)"
+        range_str = (f"{signal['range_low']:.2f} - {signal['range_high']:.2f}"
+                     if signal.get("range_high") is not None else f"{signal['range_low']:.2f} - ?")
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Range: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
-            f"Sweep: {signal['event_low']:.2f}  |  Test: {signal['test_low']:.2f}\n"
+            f"Range: {range_str}\n"
+            f"Spring past: {signal['event_low']:.2f}\n"
+            f"FVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}\n"
             f"Hozir: {signal['current_close']:.2f}"
         )
     elif signal["type"] == "jackpot_upthrust":
-        emoji, label = "🎰🔴", f"{tf_tag} JACKPOT: Upthrust + Test (BEARISH)"
+        emoji, label = "🎰🔴", f"{tf_tag} JACKPOT: Upthrust + FVG (BEARISH)"
+        range_str = (f"{signal['range_low']:.2f} - {signal['range_high']:.2f}"
+                     if signal.get("range_low") is not None else f"? - {signal['range_high']:.2f}")
         caption = (
             f"{emoji} {label}\n"
             f"Narx: {price_data['price']} USD\n"
-            f"Range: {signal['range_low']:.2f} - {signal['range_high']:.2f}\n"
-            f"Sweep: {signal['event_high']:.2f}  |  Test: {signal['test_high']:.2f}\n"
+            f"Range: {range_str}\n"
+            f"Upthrust yuqori: {signal['event_high']:.2f}\n"
+            f"FVG: {signal['fvg_bottom']:.2f} - {signal['fvg_top']:.2f}\n"
             f"Hozir: {signal['current_close']:.2f}"
         )
     elif signal["type"] == "luxalgo_bullish":
