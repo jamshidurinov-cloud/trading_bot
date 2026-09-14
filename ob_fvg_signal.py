@@ -213,10 +213,14 @@ def detect_ob_fvg_entry(df, lookback=300, bos_size=BOS_SIZE,
     Agar narx zonaga qaytmasdan ketaversa — signal chiqmaydi.
     Agar narx zonadan (bullish uchun pastga, bearish uchun yuqoriga)
     butunlay chiqib ketsa — signal bekor qilinadi (invalidate)."""
-    if len(df) < lookback:
+    # MUHIM (2026-09-14): qattiq "len(df) < lookback -> None" o'chirildi -
+    # bitta-ikkita sham kam kelsa ham, MAVJUD qancha sham bo'lsa - o'shani
+    # ishlatadi. Faqat mutlaqo yetarsiz (bos_size uchun ham yetmaydigan)
+    # holatda to'xtaydi.
+    if len(df) < bos_size * 2 + 5:
         return None
 
-    sub = df.iloc[-lookback:].copy()
+    sub = df.iloc[-min(lookback, len(df)):].copy()
     n = len(sub)
     cur = n - 1
 
