@@ -600,7 +600,7 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 
 def make_chart_image(df, path="/tmp/chart.png", interval="5min",
                       sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None,
-                      range_high=None, range_low=None, event_label="Sweep"):
+                      range_high=None, range_low=None, event_label="Sweep", zone_label="FVG"):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
     Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
     'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
@@ -666,7 +666,7 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
 
         if fvg_top is not None and fvg_bottom is not None:
             ax.axhspan(fvg_bottom, fvg_top, color=fvg_color, alpha=0.18, zorder=0)
-            ax.text(len(plot_df) * 0.01, fvg_top, f"FVG {fvg_bottom:.2f}-{fvg_top:.2f}",
+            ax.text(len(plot_df) * 0.01, fvg_top, f"{zone_label} {fvg_bottom:.2f}-{fvg_top:.2f}",
                     color=fvg_color, fontsize=10, va="bottom", fontweight="bold")
 
         if sweep_level is not None:
@@ -1314,6 +1314,9 @@ def run_signal_check(df, price_data, interval="5min"):
     chart_event_label = "Sweep"
     chart_range_high = None
     chart_range_low = None
+    chart_fvg_top = signal.get("fvg_top")
+    chart_fvg_bottom = signal.get("fvg_bottom")
+    chart_zone_label = "FVG"
     if signal["type"] == "jackpot_spring":
         chart_sweep = signal.get("event_low")
         chart_event_label = "Spring past"
@@ -1324,8 +1327,16 @@ def run_signal_check(df, price_data, interval="5min"):
         chart_event_label = "Upthrust yuqori"
         chart_range_high = signal.get("range_high")
         chart_range_low = signal.get("range_low")
-    chart_fvg_top = signal.get("fvg_top")
-    chart_fvg_bottom = signal.get("fvg_bottom")
+    elif signal["type"] in ("ob_fvg_bullish", "ob_fvg_bearish"):
+        # ob_fvg_signal.py boshqa nomlar bilan qaytaradi (fvg_top/bottom emas,
+        # zone_top/bottom; sweep_level emas, bos_level) - shu yerda moslashtiramiz.
+        # Zona manbai FVG'mi yoki OB'mi - signal['fvg_time']ga qarab aniqlanadi
+        # (None bo'lsa - OB fallback ishlatilgan, FVG topilmagan/bosib o'tilgan edi).
+        chart_sweep = signal.get("bos_level")
+        chart_event_label = "BOS"
+        chart_fvg_top = signal.get("zone_top")
+        chart_fvg_bottom = signal.get("zone_bottom")
+        chart_zone_label = "FVG" if signal.get("fvg_time") else "OB"
     chart_direction = "bullish" if signal["type"] in (
         "smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
     ) else "bearish"
@@ -1333,7 +1344,7 @@ def run_signal_check(df, price_data, interval="5min"):
         df.tail(150), interval=interval,
         sweep_level=chart_sweep, fvg_top=chart_fvg_top, fvg_bottom=chart_fvg_bottom,
         direction=chart_direction, range_high=chart_range_high, range_low=chart_range_low,
-        event_label=chart_event_label,
+        event_label=chart_event_label, zone_label=chart_zone_label,
     )
 
     tf_tag = f"[{interval}]"
