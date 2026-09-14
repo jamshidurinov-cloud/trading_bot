@@ -600,7 +600,8 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 
 def make_chart_image(df, path="/tmp/chart.png", interval="5min",
                       sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None,
-                      range_high=None, range_low=None, event_label="Sweep", zone_label="FVG"):
+                      range_high=None, range_low=None, event_label="Sweep", zone_label="FVG",
+                      zone_start_time=None):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
     Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
     'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
@@ -614,6 +615,7 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
     `range_high`/`range_low` berilsa (JACKPOT uchun) - range CHEGARASI ham
     soyali zona sifatida (FVG'dan boshqa rangda) chiziladi."""
     import mplfinance as mpf
+    import pandas as pd
 
     plot_df = df.copy()
     prev_close = plot_df["close"].shift(1)
@@ -665,8 +667,20 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
                     color="#455a64", fontsize=10, va="bottom", fontweight="bold")
 
         if fvg_top is not None and fvg_bottom is not None:
-            ax.axhspan(fvg_bottom, fvg_top, color=fvg_color, alpha=0.18, zorder=0)
-            ax.text(len(plot_df) * 0.01, fvg_top, f"{zone_label} {fvg_bottom:.2f}-{fvg_top:.2f}",
+            xmin_frac = 0.0
+            label_x = len(plot_df) * 0.01
+            if zone_start_time is not None:
+                try:
+                    ts = pd.Timestamp(zone_start_time)
+                    pos = plot_df.index.searchsorted(ts)
+                    pos = max(0, min(pos, len(plot_df) - 1))
+                    xmin_frac = pos / len(plot_df)
+                    label_x = pos
+                except Exception:
+                    pass
+            ax.axhspan(fvg_bottom, fvg_top, xmin=xmin_frac, xmax=1.0,
+                       color=fvg_color, alpha=0.18, zorder=0)
+            ax.text(label_x, fvg_top, f"{zone_label} {fvg_bottom:.2f}-{fvg_top:.2f}",
                     color=fvg_color, fontsize=10, va="bottom", fontweight="bold")
 
         if sweep_level is not None:
@@ -1317,6 +1331,7 @@ def run_signal_check(df, price_data, interval="5min"):
     chart_fvg_top = signal.get("fvg_top")
     chart_fvg_bottom = signal.get("fvg_bottom")
     chart_zone_label = "FVG"
+    chart_zone_start_time = signal.get("fvg_time")
     if signal["type"] == "jackpot_spring":
         chart_sweep = signal.get("event_low")
         chart_event_label = "Spring past"
@@ -1337,6 +1352,9 @@ def run_signal_check(df, price_data, interval="5min"):
         chart_fvg_top = signal.get("zone_top")
         chart_fvg_bottom = signal.get("zone_bottom")
         chart_zone_label = "FVG" if signal.get("fvg_time") else "OB"
+        # Zona qayerdan boshlab chizilishi kerak: FVG bo'lsa - fvg_time,
+        # aks holda (OB fallback) - ob_time (OB manbai boshlangan nuqta)
+        chart_zone_start_time = signal.get("fvg_time") or signal.get("ob_time")
     chart_direction = "bullish" if signal["type"] in (
         "smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
     ) else "bearish"
@@ -1345,6 +1363,7 @@ def run_signal_check(df, price_data, interval="5min"):
         sweep_level=chart_sweep, fvg_top=chart_fvg_top, fvg_bottom=chart_fvg_bottom,
         direction=chart_direction, range_high=chart_range_high, range_low=chart_range_low,
         event_label=chart_event_label, zone_label=chart_zone_label,
+        zone_start_time=chart_zone_start_time,
     )
 
     tf_tag = f"[{interval}]"
