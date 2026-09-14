@@ -1296,17 +1296,22 @@ def is_market_transition_buffer(now_utc, buffer_minutes=60):
 
 
 def run_signal_check(df, price_data, interval="5min"):
-    # YANGI JACKPOT (2026-09-12): Range+Spring/Upthrust+FVG. Eng kuchli signal
-    # sifatida birinchi tekshiriladi. MUHIM: pastdagi is_smc_signal tekshiruvi
-    # tufayli, bu ALLAQACHON Worker'ga (haqiqiy savdoga) YUBORILMAYDI - faqat
-    # Telegram/Gist orqali KUZATISH uchun. Sinovdan o'tgach, Worker'ga ham
-    # ulanadi (is_smc_signal ro'yxatiga qo'shiladi).
+    # MUHIM TUZATISH (2026-09-14): AVVAL bu yerda "qisqa tutashuv" (short-circuit)
+    # bor edi - agar jackpot topilsa, ob_fvg va smc HATTO CHAQIRILMASDI ham.
+    # Bu XATO edi: `smc` - Worker'ga (haqiqiy savdoga) ketadigan YAGONA signal
+    # turi, jackpot/ob_fvg esa faqat kuzatuv uchun. Agar smc HISOBLANMASA -
+    # haqiqiy savdo imkoniyati BUTUNLAY yo'qolishi mumkin edi. Endi - BARCHA
+    # UCHTASI HAR DOIM, shart-siz hisoblanadi. Qaysi birini "signal" sifatida
+    # ishlatish (Telegram/Gist/Worker) - alohida, pastdagi ustuvorlik bilan
+    # hal qilinadi: SMC birinchi (chunki u yagona real savdoga ta'sir qiladi),
+    # keyin jackpot, keyin ob_fvg (ikkalasi ham faqat kuzatuv, ustuvorlik farqi
+    # amaliy ahamiyatga ega emas, lekin izchillik uchun saqlangan).
     jackpot = detect_jackpot_signal(df, lookback=300)
-    ob_fvg = None if jackpot else detect_ob_fvg_entry(df, lookback=300)
+    ob_fvg = detect_ob_fvg_entry(df, lookback=300)
     # 🔥 SMC signal endi 'smartmoneyconcepts' (LuxAlgo'dan portlangan, sinalgan)
     # kutubxonasi asosida - BOS va CHoCH'ni aniq, pattern-matching orqali ajratadi
-    smc = None if (jackpot or ob_fvg) else detect_luxalgo_signal(df, lookback=300)
-    signal = jackpot or ob_fvg or smc
+    smc = detect_luxalgo_signal(df, lookback=300)
+    signal = smc or jackpot or ob_fvg
 
     if not signal:
         last_close = df["close"].iloc[-1]
