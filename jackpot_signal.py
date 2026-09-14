@@ -84,18 +84,29 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
     spring_reason = "range/spring topilmadi"
     if springs:
         last_spring = springs[-1]
-        spring_reason = f"spring @{last_spring['confirm_idx']} (lvl={last_spring['pivot_level']:.2f}) topildi, lekin mos FVG yo'q"
+        event_idx = last_spring["confirm_idx"]
+        event_low_val = sub["low"].iloc[event_idx]
+        spring_reason = f"spring @{event_idx} (lvl={last_spring['pivot_level']:.2f}) topildi, lekin mos FVG yo'q"
         matching_fvgs = [f for f in fvgs if f["direction"] == "bullish"
-                          and f["confirm_idx"] > last_spring["confirm_idx"]]
+                          and f["confirm_idx"] > event_idx]
         if matching_fvgs:
             fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
-            if fvg["confirm_idx"] >= cur - fresh_fvg_window + 1:
-                event_idx = last_spring["confirm_idx"]
+            # MUHIM (2026-09-14, Jamshid topgan xato): Spring+FVG orasida narx
+            # SPRING'NING ENG PASTIDAN (event_low) HAM PASTGA tushib ketgan
+            # bo'lsa - bu, bullish g'oyaning o'zi BEKOR bo'lgani (haqiqiy
+            # tushish davom etayotgani), FVG esa spring bilan hech qanday
+            # aloqasi yo'q, boshqa (teskari) harakatning qismi bo'lishi mumkin.
+            invalidated = any(sub["low"].iloc[k] < event_low_val for k in range(event_idx + 1, fvg["confirm_idx"]))
+            if invalidated:
+                spring_reason = (f"spring @{event_idx} + FVG @{fvg['confirm_idx']} topildi, "
+                                  f"lekin orada narx spring pastidan ({event_low_val:.2f}) "
+                                  f"HAM PASTGA tushib ketgan - BEKOR")
+            elif fvg["confirm_idx"] >= cur - fresh_fvg_window + 1:
                 range_high_val = box_top_series[event_idx] if not np.isnan(box_top_series[event_idx]) else None
                 range_high_str = f"{range_high_val:.2f}" if range_high_val is not None else "?"
                 range_left = range_states[event_idx]["box_left"]
                 print(f"[JACKPOT SIGNAL] SPRING: range=({last_spring['pivot_level']:.2f}-{range_high_str}) "
-                      f"spring@{event_idx}({sub['low'].iloc[event_idx]:.2f}) "
+                      f"spring@{event_idx}({event_low_val:.2f}) "
                       f"fvg@{fvg['confirm_idx']}({fvg['bottom']:.2f}-{fvg['top']:.2f}) "
                       f"narx={closes[cur]:.2f}")
                 return {
@@ -105,13 +116,14 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                     "range_time": str(times[range_left]) if range_left is not None else None,
                     "range_end_time": str(times[event_idx]),
                     "event_time": str(times[event_idx]),
-                    "event_low": sub["low"].iloc[event_idx],
+                    "event_low": event_low_val,
                     "current_close": closes[cur],
                     "fvg_time": str(times[fvg["confirm_idx"]]),
                     "fvg_top": fvg["top"],
                     "fvg_bottom": fvg["bottom"],
                 }
-            spring_reason = f"spring @{last_spring['confirm_idx']} + FVG topildi, lekin eskirgan"
+            else:
+                spring_reason = f"spring @{event_idx} + FVG topildi, lekin eskirgan"
 
     # --- UPTHRUST (bearish) ---
     upthrusts = detect_wyckoff_upthrusts(sub, external_level_series=box_top_series,
@@ -119,18 +131,27 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
     upthrust_reason = "range/upthrust topilmadi"
     if upthrusts:
         last_upthrust = upthrusts[-1]
-        upthrust_reason = f"upthrust @{last_upthrust['confirm_idx']} (lvl={last_upthrust['pivot_level']:.2f}) topildi, lekin mos FVG yo'q"
+        event_idx = last_upthrust["confirm_idx"]
+        event_high_val = sub["high"].iloc[event_idx]
+        upthrust_reason = f"upthrust @{event_idx} (lvl={last_upthrust['pivot_level']:.2f}) topildi, lekin mos FVG yo'q"
         matching_fvgs = [f for f in fvgs if f["direction"] == "bearish"
-                          and f["confirm_idx"] > last_upthrust["confirm_idx"]]
+                          and f["confirm_idx"] > event_idx]
         if matching_fvgs:
             fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
-            if fvg["confirm_idx"] >= cur - fresh_fvg_window + 1:
-                event_idx = last_upthrust["confirm_idx"]
+            # MUHIM (2026-09-14, Jamshid topgan xato, simmetrik): Upthrust+FVG
+            # orasida narx UPTHRUST'NING ENG YUQORISIDAN (event_high) HAM
+            # YUQORIGA chiqib ketgan bo'lsa - bekor.
+            invalidated = any(sub["high"].iloc[k] > event_high_val for k in range(event_idx + 1, fvg["confirm_idx"]))
+            if invalidated:
+                upthrust_reason = (f"upthrust @{event_idx} + FVG @{fvg['confirm_idx']} topildi, "
+                                     f"lekin orada narx upthrust yuqorisidan ({event_high_val:.2f}) "
+                                     f"HAM YUQORIGA chiqib ketgan - BEKOR")
+            elif fvg["confirm_idx"] >= cur - fresh_fvg_window + 1:
                 range_low_val = box_bottom_series[event_idx] if not np.isnan(box_bottom_series[event_idx]) else None
                 range_low_str = f"{range_low_val:.2f}" if range_low_val is not None else "?"
                 range_left = range_states[event_idx]["box_left"]
                 print(f"[JACKPOT SIGNAL] UPTHRUST: range=({range_low_str}-{last_upthrust['pivot_level']:.2f}) "
-                      f"upthrust@{event_idx}({sub['high'].iloc[event_idx]:.2f}) "
+                      f"upthrust@{event_idx}({event_high_val:.2f}) "
                       f"fvg@{fvg['confirm_idx']}({fvg['bottom']:.2f}-{fvg['top']:.2f}) "
                       f"narx={closes[cur]:.2f}")
                 return {
@@ -140,13 +161,14 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                     "range_time": str(times[range_left]) if range_left is not None else None,
                     "range_end_time": str(times[event_idx]),
                     "event_time": str(times[event_idx]),
-                    "event_high": sub["high"].iloc[event_idx],
+                    "event_high": event_high_val,
                     "current_close": closes[cur],
                     "fvg_time": str(times[fvg["confirm_idx"]]),
                     "fvg_top": fvg["top"],
                     "fvg_bottom": fvg["bottom"],
                 }
-            upthrust_reason = f"upthrust @{last_upthrust['confirm_idx']} + FVG topildi, lekin eskirgan"
+            else:
+                upthrust_reason = f"upthrust @{event_idx} + FVG topildi, lekin eskirgan"
 
     print(f"[JACKPOT DEBUG] bullish: {spring_reason} || bearish: {upthrust_reason}")
     return None
