@@ -93,6 +93,7 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                 event_idx = last_spring["confirm_idx"]
                 range_high_val = box_top_series[event_idx] if not np.isnan(box_top_series[event_idx]) else None
                 range_high_str = f"{range_high_val:.2f}" if range_high_val is not None else "?"
+                range_left = range_states[event_idx]["box_left"]
                 print(f"[JACKPOT SIGNAL] SPRING: range=({last_spring['pivot_level']:.2f}-{range_high_str}) "
                       f"spring@{event_idx}({sub['low'].iloc[event_idx]:.2f}) "
                       f"fvg@{fvg['confirm_idx']}({fvg['bottom']:.2f}-{fvg['top']:.2f}) "
@@ -101,6 +102,8 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                     "type": "jackpot_spring",
                     "range_high": range_high_val,
                     "range_low": last_spring["pivot_level"],
+                    "range_time": str(times[range_left]) if range_left is not None else None,
+                    "range_end_time": str(times[event_idx]),
                     "event_time": str(times[event_idx]),
                     "event_low": sub["low"].iloc[event_idx],
                     "current_close": closes[cur],
@@ -125,6 +128,7 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                 event_idx = last_upthrust["confirm_idx"]
                 range_low_val = box_bottom_series[event_idx] if not np.isnan(box_bottom_series[event_idx]) else None
                 range_low_str = f"{range_low_val:.2f}" if range_low_val is not None else "?"
+                range_left = range_states[event_idx]["box_left"]
                 print(f"[JACKPOT SIGNAL] UPTHRUST: range=({range_low_str}-{last_upthrust['pivot_level']:.2f}) "
                       f"upthrust@{event_idx}({sub['high'].iloc[event_idx]:.2f}) "
                       f"fvg@{fvg['confirm_idx']}({fvg['bottom']:.2f}-{fvg['top']:.2f}) "
@@ -133,6 +137,8 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                     "type": "jackpot_upthrust",
                     "range_high": last_upthrust["pivot_level"],
                     "range_low": range_low_val,
+                    "range_time": str(times[range_left]) if range_left is not None else None,
+                    "range_end_time": str(times[event_idx]),
                     "event_time": str(times[event_idx]),
                     "event_high": sub["high"].iloc[event_idx],
                     "current_close": closes[cur],
