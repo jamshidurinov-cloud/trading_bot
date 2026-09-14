@@ -601,7 +601,8 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 def make_chart_image(df, path="/tmp/chart.png", interval="5min",
                       sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None,
                       range_high=None, range_low=None, event_label="Sweep", zone_label="FVG",
-                      zone_start_time=None, range_start_time=None, range_end_time=None):
+                      zone_start_time=None, range_start_time=None, range_end_time=None,
+                      ob_top=None, ob_bottom=None, ob_start_time=None, event_start_time=None):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
     Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
     'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
@@ -639,7 +640,8 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
     )
 
     has_overlay = (sweep_level is not None or (fvg_top is not None and fvg_bottom is not None)
-                   or (range_high is not None and range_low is not None))
+                   or (range_high is not None and range_low is not None)
+                   or (ob_top is not None and ob_bottom is not None))
 
     fig, axlist = mpf.plot(
         plot_df,
@@ -699,9 +701,39 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
             ax.text(label_x, fvg_top, f"{zone_label} {fvg_bottom:.2f}-{fvg_top:.2f}",
                     color=fvg_color, fontsize=10, va="bottom", fontweight="bold")
 
+        if ob_top is not None and ob_bottom is not None:
+            # OB - FVG'dan MUSTAQIL, alohida zona sifatida (ko'k rang) - har
+            # doim ikkalasi ham (agar mavjud bo'lsa) BIRGA ko'rsatiladi.
+            ob_xmin_frac = 0.0
+            ob_label_x = len(plot_df) * 0.01
+            if ob_start_time is not None:
+                try:
+                    ts = pd.Timestamp(ob_start_time)
+                    pos = plot_df.index.searchsorted(ts)
+                    pos = max(0, min(pos, len(plot_df) - 1))
+                    ob_xmin_frac = pos / len(plot_df)
+                    ob_label_x = pos
+                except Exception:
+                    pass
+            ax.axhspan(ob_bottom, ob_top, xmin=ob_xmin_frac, xmax=1.0,
+                       color="#3f51b5", alpha=0.18, zorder=0)
+            ax.text(ob_label_x, ob_bottom, f"OB {ob_bottom:.2f}-{ob_top:.2f}",
+                    color="#3f51b5", fontsize=10, va="top", fontweight="bold")
+
         if sweep_level is not None:
-            ax.axhline(sweep_level, color=sweep_color, linestyle="--", linewidth=1.5, zorder=1)
-            ax.text(len(plot_df) * 0.01, sweep_level, f"{event_label} {sweep_level:.2f}",
+            event_xmin = 0.0
+            event_label_x = len(plot_df) * 0.01
+            if event_start_time is not None:
+                try:
+                    pos = plot_df.index.searchsorted(pd.Timestamp(event_start_time))
+                    pos = max(0, min(pos, len(plot_df) - 1))
+                    event_xmin = pos / len(plot_df)
+                    event_label_x = pos
+                except Exception:
+                    pass
+            ax.axhline(sweep_level, xmin=event_xmin, xmax=1.0,
+                       color=sweep_color, linestyle="--", linewidth=1.5, zorder=1)
+            ax.text(event_label_x, sweep_level, f"{event_label} {sweep_level:.2f}",
                     color=sweep_color, fontsize=10, va="bottom", fontweight="bold")
 
     fig.savefig(path, dpi=220, bbox_inches="tight")
@@ -1355,6 +1387,10 @@ def run_signal_check(df, price_data, interval="5min"):
     chart_fvg_bottom = signal.get("fvg_bottom")
     chart_zone_label = "FVG"
     chart_zone_start_time = signal.get("fvg_time")
+    chart_event_start_time = signal.get("sweep_time")
+    chart_ob_top = None
+    chart_ob_bottom = None
+    chart_ob_start_time = None
     if signal["type"] == "jackpot_spring":
         chart_sweep = signal.get("event_low")
         chart_event_label = "Spring past"
@@ -1362,6 +1398,7 @@ def run_signal_check(df, price_data, interval="5min"):
         chart_range_low = signal.get("range_low")
         chart_range_start_time = signal.get("range_time")
         chart_range_end_time = signal.get("range_end_time")
+        chart_event_start_time = signal.get("event_time")
     elif signal["type"] == "jackpot_upthrust":
         chart_sweep = signal.get("event_high")
         chart_event_label = "Upthrust yuqori"
@@ -1369,19 +1406,21 @@ def run_signal_check(df, price_data, interval="5min"):
         chart_range_low = signal.get("range_low")
         chart_range_start_time = signal.get("range_time")
         chart_range_end_time = signal.get("range_end_time")
+        chart_event_start_time = signal.get("event_time")
     elif signal["type"] in ("ob_fvg_bullish", "ob_fvg_bearish"):
-        # ob_fvg_signal.py boshqa nomlar bilan qaytaradi (fvg_top/bottom emas,
-        # zone_top/bottom; sweep_level emas, bos_level) - shu yerda moslashtiramiz.
-        # Zona manbai FVG'mi yoki OB'mi - signal['fvg_time']ga qarab aniqlanadi
-        # (None bo'lsa - OB fallback ishlatilgan, FVG topilmagan/bosib o'tilgan edi).
+        # ob_fvg_signal.py boshqa nomlar bilan qaytaradi (sweep_level emas,
+        # bos_level) - shu yerda moslashtiramiz. FVG va OB endi IKKALASI HAM
+        # (mavjud bo'lsa) MUSTAQIL, alohida chiziladi - faqat biri emas.
         chart_sweep = signal.get("bos_level")
         chart_event_label = "BOS"
-        chart_fvg_top = signal.get("zone_top")
-        chart_fvg_bottom = signal.get("zone_bottom")
-        chart_zone_label = "FVG" if signal.get("fvg_time") else "OB"
-        # Zona qayerdan boshlab chizilishi kerak: FVG bo'lsa - fvg_time,
-        # aks holda (OB fallback) - ob_time (OB manbai boshlangan nuqta)
-        chart_zone_start_time = signal.get("fvg_time") or signal.get("ob_time")
+        chart_fvg_top = signal.get("fvg_top")
+        chart_fvg_bottom = signal.get("fvg_bottom")
+        chart_zone_label = "FVG"
+        chart_zone_start_time = signal.get("fvg_time")
+        chart_ob_top = signal.get("ob_top")
+        chart_ob_bottom = signal.get("ob_bottom")
+        chart_ob_start_time = signal.get("ob_time")
+        chart_event_start_time = signal.get("bos_time")
     chart_direction = "bullish" if signal["type"] in (
         "smc_bullish", "luxalgo_bullish", "dynamic_spring", "jackpot_spring", "ob_fvg_bullish"
     ) else "bearish"
@@ -1392,6 +1431,8 @@ def run_signal_check(df, price_data, interval="5min"):
         event_label=chart_event_label, zone_label=chart_zone_label,
         zone_start_time=chart_zone_start_time,
         range_start_time=chart_range_start_time, range_end_time=chart_range_end_time,
+        ob_top=chart_ob_top, ob_bottom=chart_ob_bottom, ob_start_time=chart_ob_start_time,
+        event_start_time=chart_event_start_time,
     )
 
     tf_tag = f"[{interval}]"
