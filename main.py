@@ -601,7 +601,7 @@ def detect_range_state(df, lookback=RANGE_LOOKBACK, tight_threshold_pct=0.5):
 def make_chart_image(df, path="/tmp/chart.png", interval="5min",
                       sweep_level=None, fvg_top=None, fvg_bottom=None, direction=None,
                       range_high=None, range_low=None, event_label="Sweep", zone_label="FVG",
-                      zone_start_time=None):
+                      zone_start_time=None, range_start_time=None, range_end_time=None):
     """OHLCV ma'lumotidan katta, aniq o'qiladigan candlestick + volume grafik chizadi.
     Eslatma: faqat GRAFIK uchun, har svechaning 'open'ini oldingi svechaning
     'close'iga moslashtiramiz (TradingView'dagi kabi uzluksiz ko'rinish uchun) -
@@ -662,8 +662,24 @@ def make_chart_image(df, path="/tmp/chart.png", interval="5min",
         # FVG kirish zonasi (yashil). bearish - teskarisi.
 
         if range_high is not None and range_low is not None:
-            ax.axhspan(range_low, range_high, color="#607d8b", alpha=0.12, zorder=-1)
-            ax.text(len(plot_df) * 0.01, range_high, f"Range {range_low:.2f}-{range_high:.2f}",
+            range_xmin, range_xmax = 0.0, 1.0
+            range_label_x = len(plot_df) * 0.01
+            if range_start_time is not None:
+                try:
+                    pos = plot_df.index.searchsorted(pd.Timestamp(range_start_time))
+                    range_xmin = max(0, min(pos, len(plot_df) - 1)) / len(plot_df)
+                    range_label_x = max(0, min(pos, len(plot_df) - 1))
+                except Exception:
+                    pass
+            if range_end_time is not None:
+                try:
+                    pos_end = plot_df.index.searchsorted(pd.Timestamp(range_end_time))
+                    range_xmax = max(0, min(pos_end, len(plot_df) - 1)) / len(plot_df)
+                except Exception:
+                    pass
+            ax.axhspan(range_low, range_high, xmin=range_xmin, xmax=range_xmax,
+                       color="#607d8b", alpha=0.12, zorder=-1)
+            ax.text(range_label_x, range_high, f"Range {range_low:.2f}-{range_high:.2f}",
                     color="#455a64", fontsize=10, va="bottom", fontweight="bold")
 
         if fvg_top is not None and fvg_bottom is not None:
@@ -1333,6 +1349,8 @@ def run_signal_check(df, price_data, interval="5min"):
     chart_event_label = "Sweep"
     chart_range_high = None
     chart_range_low = None
+    chart_range_start_time = None
+    chart_range_end_time = None
     chart_fvg_top = signal.get("fvg_top")
     chart_fvg_bottom = signal.get("fvg_bottom")
     chart_zone_label = "FVG"
@@ -1342,11 +1360,15 @@ def run_signal_check(df, price_data, interval="5min"):
         chart_event_label = "Spring past"
         chart_range_high = signal.get("range_high")
         chart_range_low = signal.get("range_low")
+        chart_range_start_time = signal.get("range_time")
+        chart_range_end_time = signal.get("range_end_time")
     elif signal["type"] == "jackpot_upthrust":
         chart_sweep = signal.get("event_high")
         chart_event_label = "Upthrust yuqori"
         chart_range_high = signal.get("range_high")
         chart_range_low = signal.get("range_low")
+        chart_range_start_time = signal.get("range_time")
+        chart_range_end_time = signal.get("range_end_time")
     elif signal["type"] in ("ob_fvg_bullish", "ob_fvg_bearish"):
         # ob_fvg_signal.py boshqa nomlar bilan qaytaradi (fvg_top/bottom emas,
         # zone_top/bottom; sweep_level emas, bos_level) - shu yerda moslashtiramiz.
@@ -1369,6 +1391,7 @@ def run_signal_check(df, price_data, interval="5min"):
         direction=chart_direction, range_high=chart_range_high, range_low=chart_range_low,
         event_label=chart_event_label, zone_label=chart_zone_label,
         zone_start_time=chart_zone_start_time,
+        range_start_time=chart_range_start_time, range_end_time=chart_range_end_time,
     )
 
     tf_tag = f"[{interval}]"
