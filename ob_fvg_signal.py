@@ -166,6 +166,10 @@ def _try_direction(direction, bos_events, order_blocks, fvgs, sub, cur,
                     "ob_time": str(times[ob["source_idx"]]),
                     "zone_top": zone_top,
                     "zone_bottom": zone_bottom,
+                    "fvg_top": fvg["top"],
+                    "fvg_bottom": fvg["bottom"],
+                    "ob_top": ob["bar_high"],
+                    "ob_bottom": ob["bar_low"],
                     "entry_close": closes[cur],
                 }, None
             if not reason_captured:
@@ -193,6 +197,8 @@ def _try_direction(direction, bos_events, order_blocks, fvgs, sub, cur,
                 "ob_time": str(times[ob["source_idx"]]),
                 "zone_top": zone_top,
                 "zone_bottom": zone_bottom,
+                "ob_top": ob["bar_high"],
+                "ob_bottom": ob["bar_low"],
                 "entry_close": closes[cur],
             }, None
         if not reason_captured:
