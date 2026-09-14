@@ -58,10 +58,15 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
     Qaytaradi (topilsa): eski JACKPOT bilan bir xil asosiy maydonlar
     (type, range_high, range_low, event_time, event_low/event_high,
     current_close) + YANGI: fvg_time, fvg_top, fvg_bottom."""
-    if len(df) < lookback:
+    # MUHIM (2026-09-14): qattiq "len(df) < lookback -> None" o'chirildi -
+    # bitta-ikkita sham kam kelsa ham (masalan 299 ta, 300 emas - real
+    # amaliyotda tez-tez uchraydi), BUTUNLAY to'xtab qolmasdan, MAVJUD
+    # qancha sham bo'lsa - o'shani ishlatadi. Faqat mutlaqo yetarsiz
+    # (range_length uchun ham yetmaydigan) holatda to'xtaydi.
+    if len(df) < range_length + 5:
         return None
 
-    sub = df.iloc[-lookback:].copy()
+    sub = df.iloc[-min(lookback, len(df)):].copy()
     n = len(sub)
     cur = n - 1
     closes = sub["close"].to_numpy(dtype=float)
