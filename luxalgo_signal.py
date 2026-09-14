@@ -41,9 +41,13 @@ def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=5
     nazar. FVG threshold esa (`detect_fvg`da) oynaning boshidan kumulyativ
     o'rtacha asosida hisoblanadi - bu, oyna kattaligiga qarab, biroz farqli
     sezgirlik berishi MUMKIN (yaxshi yoki yomon tomonga - buni bozor
-    ochilgach, 144 va 300 natijalarini solishtirib aniqlash tavsiya etiladi)."""
-    sub = df.iloc[-lookback:].copy()
-    if len(sub) < lookback:
+    ochilgach, 144 va 300 natijalarini solishtirib aniqlash tavsiya etiladi).
+
+    MUHIM (2026-09-14): qattiq "len(sub) < lookback -> None" o'chirildi -
+    bitta-ikkita sham kam kelsa ham (masalan 299 ta, 300 emas), BUTUNLAY
+    to'xtab qolmasdan, MAVJUD qancha sham bo'lsa - o'shani ishlatadi."""
+    sub = df.iloc[-min(lookback, len(df)):].copy()
+    if len(sub) < swing_length * 2 + 5:
         return None
 
     n = len(sub)
