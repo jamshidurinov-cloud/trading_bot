@@ -13,7 +13,7 @@ ESLATMA (2026-09-12, yana): bu fayl avval yana uchta funksiyani ham o'z
 ichiga olardi - `detect_dynamic_range` (teng cho'qqi/tub klasterlash
 asosida), `detect_dynamic_spring_upthrust` va eski `detect_jackpot_signal`
 (Spring/Upthrust + Test). Булар ~1000 ta yig'ilgan signal ichida <1%
-chastota bilan ishlagani (amalda ishlamagani) sababli OLIB TASHLANDI va
+chastota bilan ishlagani (amalda ishlamagan) sababli OLIB TASHLANDI va
 quyidagi yangi arxitektura bilan ALMASHTIRILDI.
 
 Yangi `detect_jackpot_signal` HAM eski bilan bir xil `"jackpot_spring"`/
@@ -48,11 +48,19 @@ from luxalgo_smc import detect_fvg
 
 JACKPOT_MAX_SPRING_ATTEMPTS = 3   # Spring/Upthrust uchun max muvaffaqiyatsiz urinish
 JACKPOT_FRESH_FVG_WINDOW = 5      # FVG spring/upthrust'dan keyin "qancha uzoqlashishi" mumkin
+JACKPOT_MAX_BARS_AFTER_EVENT = 15  # MUHIM (2026-09-15, Jamshid topgan xato): FVG
+                                    # spring/upthrust VOQEASIDAN necha bar ICHIDA
+                                    # topilishi kerak - bundan uzoq bo'lsa, narx
+                                    # invalidatsiyaga uchramagan bo'lsa ham, FVG
+                                    # springga "aloqasi yo'q" boshqa harakatning
+                                    # qismi bo'lishi mumkin (masofa emas, VOQEADAN
+                                    # KEYINGI BAR SONI bo'yicha cheklanadi)
 
 
 def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, range_atr_len=500,
                             max_spring_attempts=JACKPOT_MAX_SPRING_ATTEMPTS,
-                            fresh_fvg_window=JACKPOT_FRESH_FVG_WINDOW):
+                            fresh_fvg_window=JACKPOT_FRESH_FVG_WINDOW,
+                            max_bars_after_event=JACKPOT_MAX_BARS_AFTER_EVENT):
     """YANGI JACKPOT: Range + Spring/Upthrust + FVG.
 
     Qaytaradi (topilsa): eski JACKPOT bilan bir xil asosiy maydonlar
@@ -91,13 +99,25 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                           and f["confirm_idx"] > event_idx]
         if matching_fvgs:
             fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
+            # MUHIM (2026-09-15, Jamshid topgan xato): FVG spring voqeasidan
+            # (event_idx) `max_bars_after_event` bardan UZOQ bo'lsa - bekor.
+            # Buni tekshirmasdan avval, FVG springga hech qanday aloqasi
+            # yo'q, ko'p keyin (masalan 100-200 bar) boshqa harakatdan
+            # kelib chiqqan bo'lishi mumkin edi, garchi orada narx
+            # event_low'dan pastga tushmagan (invalidatsiyaga uchramagan)
+            # bo'lsa ham.
+            too_far = (fvg["confirm_idx"] - event_idx) > max_bars_after_event
             # MUHIM (2026-09-14, Jamshid topgan xato): Spring+FVG orasida narx
             # SPRING'NING ENG PASTIDAN (event_low) HAM PASTGA tushib ketgan
             # bo'lsa - bu, bullish g'oyaning o'zi BEKOR bo'lgani (haqiqiy
             # tushish davom etayotgani), FVG esa spring bilan hech qanday
             # aloqasi yo'q, boshqa (teskari) harakatning qismi bo'lishi mumkin.
             invalidated = any(sub["low"].iloc[k] < event_low_val for k in range(event_idx + 1, fvg["confirm_idx"]))
-            if invalidated:
+            if too_far:
+                spring_reason = (f"spring @{event_idx} + FVG @{fvg['confirm_idx']} topildi, "
+                                  f"lekin orasi {fvg['confirm_idx'] - event_idx} bar "
+                                  f"(max {max_bars_after_event}) - JUDA UZOQ, BEKOR")
+            elif invalidated:
                 spring_reason = (f"spring @{event_idx} + FVG @{fvg['confirm_idx']} topildi, "
                                   f"lekin orada narx spring pastidan ({event_low_val:.2f}) "
                                   f"HAM PASTGA tushib ketgan - BEKOR")
@@ -138,11 +158,18 @@ def detect_jackpot_signal(df, lookback=300, range_length=20, range_mult=1.0, ran
                           and f["confirm_idx"] > event_idx]
         if matching_fvgs:
             fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
+            # MUHIM (2026-09-15, simmetrik): FVG upthrust voqeasidan
+            # `max_bars_after_event` bardan uzoq bo'lsa - bekor.
+            too_far = (fvg["confirm_idx"] - event_idx) > max_bars_after_event
             # MUHIM (2026-09-14, Jamshid topgan xato, simmetrik): Upthrust+FVG
             # orasida narx UPTHRUST'NING ENG YUQORISIDAN (event_high) HAM
             # YUQORIGA chiqib ketgan bo'lsa - bekor.
             invalidated = any(sub["high"].iloc[k] > event_high_val for k in range(event_idx + 1, fvg["confirm_idx"]))
-            if invalidated:
+            if too_far:
+                upthrust_reason = (f"upthrust @{event_idx} + FVG @{fvg['confirm_idx']} topildi, "
+                                     f"lekin orasi {fvg['confirm_idx'] - event_idx} bar "
+                                     f"(max {max_bars_after_event}) - JUDA UZOQ, BEKOR")
+            elif invalidated:
                 upthrust_reason = (f"upthrust @{event_idx} + FVG @{fvg['confirm_idx']} topildi, "
                                      f"lekin orada narx upthrust yuqorisidan ({event_high_val:.2f}) "
                                      f"HAM YUQORIGA chiqib ketgan - BEKOR")
