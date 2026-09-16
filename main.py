@@ -908,10 +908,13 @@ def is_duplicate_signal(signal, interval):
     return False
 
 
-def send_to_worker(event_key, direction, entry_price, sl_price, tp_dict, timeframe):
+def send_to_worker(event_key, direction, entry_price, sl_price, tp_dict, timeframe, profile="smc"):
     """Trade execution Worker'ga (hali qurilmagan/sozlanmagan) signal ma'lumotini
     yuboradi. WORKER_URL sozlanmagan bo'lsa, jim o'tkazib yuboriladi - hozirgi
-    Telegram/Gist ishlashiga hech qanday ta'sir qilmaydi."""
+    Telegram/Gist ishlashiga hech qanday ta'sir qilmaydi.
+
+    profile: "smc" (standart, 7-bosqichli trailing) yoki "ob_fvg" (YANGI,
+    2026-09-15, sodda: TP qattiq TP3'da, faqat TP2'da SL breakeven'ga)."""
     if not WORKER_URL:
         return
     import requests
@@ -920,6 +923,7 @@ def send_to_worker(event_key, direction, entry_price, sl_price, tp_dict, timefra
         "symbol": "XAUUSD",
         "timeframe": timeframe,
         "strategy": "SMC_Sweep_FVG",
+        "profile": profile,
         "direction": direction,  # "BUY" yoki "SELL"
         "entry_price": entry_price,
         "sl_price": sl_price,
@@ -964,19 +968,29 @@ def log_new_signal(signal, price_data, interval):
     now_utc = dt.datetime.now(dt.timezone.utc)
     in_session = is_active_session(now_utc)
 
-    # SL/TP tayyor bo'ldi - Worker'ga FAQAT 🔥 SMC signal turlari yuboriladi
-    # (luxalgo_bullish/bearish) - chunki statistik jihatdan yagona
-    # ishonchli strategiya shu. JACKPOT, Spring/Upthrust, OB/FVG - hali kichik
-    # namuna, ishonchsiz, shuning uchun Worker'ga (demo avtomatik ijroga)
-    # yuborilmaydi, faqat Telegram/Gist'da (kuzatuv uchun) qoladi.
-    is_smc_signal = signal["type"] in ("luxalgo_bullish", "luxalgo_bearish")
+    # SL/TP tayyor bo'ldi - Worker'ga SMC va endi OB/FVG (YANGI, 2026-09-15,
+    # sodda "qattiq TP3" profili bilan) yuboriladi. JACKPOT hamon faqat
+    # kuzatuv (statistik jihatdan hali ishonchsiz).
+    should_send_to_worker = signal["type"] in (
+        "luxalgo_bullish", "luxalgo_bearish", "ob_fvg_bullish", "ob_fvg_bearish",
+    )
+    profile = "ob_fvg" if signal["type"] in ("ob_fvg_bullish", "ob_fvg_bearish") else "smc"
+
+    # MUHIM (2026-09-15, Gist chuqur tahlili asosida): OB/FVG uchun
+    # QO'SHIMCHA shart - FAQAT sessiya ichida VA FAQAT 1min. Tahlilda
+    # sessiyadan tashqarida OB/FVG'ning ANIQ 0R foyda berganini (17.4%
+    # aniqlik), 5min'da esa juda kichik, ahamiyatsiz namuna (10 ta signal)
+    # borligini ko'rdik - shuning uchun bu ikki holatda worker'ga yubormaymiz,
+    # faqat kuzatuvda (Gist/Telegram) qoldiramiz.
+    if profile == "ob_fvg":
+        should_send_to_worker = should_send_to_worker and in_session and interval == "1min"
 
     # Sessiya ichida HAM, tashqarisida HAM yuboriladi (ikkalasi ham statistik
     # jihatdan musbat). Faqat bozor HAFTALIK yopilish/ochilish va KUNLIK
     # NY->Osiyo sokin oralig'idagi notekis davr chetlab o'tiladi.
     in_buffer = is_market_transition_buffer(now_utc)
 
-    if is_smc_signal and not in_buffer:
+    if should_send_to_worker and not in_buffer:
         send_to_worker(
             event_key=event_key,
             direction="BUY" if direction == "bullish" else "SELL",
@@ -986,9 +1000,14 @@ def log_new_signal(signal, price_data, interval):
                      "TP8": tp8_level, "TP10": tp10_level, "TP12": tp12_level,
                      "TP15": tp15_level},
             timeframe=interval,
+            profile=profile,
         )
-    elif not is_smc_signal:
-        print(f"[WORKER] Signal turi ({signal['type']}) SMC emas - Worker'ga yuborilmadi (faqat Gist/Telegram'da qoladi).")
+    elif not should_send_to_worker:
+        if profile == "ob_fvg" and signal["type"] in ("luxalgo_bullish", "luxalgo_bearish", "ob_fvg_bullish", "ob_fvg_bearish"):
+            print(f"[WORKER] OB/FVG signal, lekin sessiya/interval shartiga mos emas "
+                  f"(sessiya={'ichida' if in_session else 'tashqarida'}, interval={interval}) - yuborilmadi.")
+        else:
+            print(f"[WORKER] Signal turi ({signal['type']}) hali Worker'ga ulanmagan - yuborilmadi (faqat Gist/Telegram'da qoladi).")
     else:
         print(f"[WORKER] Bozor yopilish/ochilish buferida - Worker'ga yuborilmadi (faqat Gist/Telegram'da qoladi).")
 
@@ -1028,12 +1047,107 @@ def log_new_signal(signal, price_data, interval):
             pass
 
 
+# ============================================================================
+# HAQIQIY TRAILING SIMULYATSIYASI (2026-09-15) - statistika endi HAQIQIY
+# trailing SL/TP mexanizmini (trade_manager.py'dagi kabi) bar-by-bar
+# simulyatsiya qiladi, shunchaki "eng uzoq qayerga borgani" emas.
+# ============================================================================
+
+# SMC uchun (trade_manager.py'dagi HAQIQIY, jonli mexanizm bilan bir xil):
+# checkpoint -> (yangi SL manbai, yangi TP manbai). "entry" - SL=kirish narxi
+# (breakeven). Raqam - SL/TP o'sha checkpoint narxiga o'rnatiladi. None - o'zgarmaydi.
+SMC_TRANSITIONS = {
+    2: ("entry", None),
+    3: (2, 8),
+    5: (3, 10),
+    8: (5, 12),
+    10: (8, 15),
+    12: (10, None),
+}
+SMC_INITIAL_TP_CHECKPOINT = 5
+
+# OB/FVG uchun (2026-09-15 YANGI, sodda profil): TP qattiq TP3'da qotiriladi,
+# faqat TP2'da SL breakeven'ga ko'tariladi - boshqa hech qanday o'zgarish yo'q.
+OB_FVG_TRANSITIONS = {
+    2: ("entry", None),
+}
+OB_FVG_INITIAL_TP_CHECKPOINT = 3
+
+
+def _profile_for_type(signal_type: str) -> str:
+    if signal_type in ("ob_fvg_bullish", "ob_fvg_bearish"):
+        return "ob_fvg"
+    return "smc"  # SMC va JACKPOT - hozircha bir xil (7-bosqichli) profilda
+
+
+def _simulate_real_trailing(direction, entry_price, initial_sl, tp_levels, candles, profile):
+    """Berilgan svechalar bo'yicha, HAQIQIY trailing SL/TP mexanizmini
+    (checkpoint o'tilgach, SL/TP qanday o'zgarishini) bar-by-bar simulyatsiya
+    qiladi - trade_manager.py'dagi jonli mexanizmga imkon qadar mos.
+
+    Qaytaradi: (outcome_str yoki None agar hali yopilmagan bo'lsa,
+                max_checkpoint - eng uzoq erishilgan checkpoint, mustaqil kuzatuv)
+    """
+    transitions = SMC_TRANSITIONS if profile == "smc" else OB_FVG_TRANSITIONS
+    initial_tp_checkpoint = SMC_INITIAL_TP_CHECKPOINT if profile == "smc" else OB_FVG_INITIAL_TP_CHECKPOINT
+
+    cur_sl = initial_sl
+    cur_tp = tp_levels.get(initial_tp_checkpoint)
+    triggered = set()
+    max_checkpoint = 0
+
+    def level_num_for_price(price):
+        for num, p in tp_levels.items():
+            if p is not None and abs(p - price) < 1e-9:
+                return num
+        return None
+
+    for _, candle in candles.iterrows():
+        lo, hi = candle["low"], candle["high"]
+
+        sl_hit = (lo <= cur_sl) if direction == "bullish" else (hi >= cur_sl)
+        tp_hit = (cur_tp is not None) and ((hi >= cur_tp) if direction == "bullish" else (lo <= cur_tp))
+
+        if sl_hit:
+            if abs(cur_sl - entry_price) < 1e-9:
+                return "breakeven", max_checkpoint
+            num = level_num_for_price(cur_sl)
+            return (f"tp{num}" if num else "loss"), max_checkpoint
+        if tp_hit:
+            num = level_num_for_price(cur_tp) or initial_tp_checkpoint
+            return f"tp{num}", max_checkpoint
+
+        for level_num in (2, 3, 5, 8, 10, 12, 15):
+            if level_num in triggered or tp_levels.get(level_num) is None:
+                continue
+            level_price = tp_levels[level_num]
+            touched = (hi >= level_price) if direction == "bullish" else (lo <= level_price)
+            if touched:
+                triggered.add(level_num)
+                max_checkpoint = max(max_checkpoint, level_num)
+                if level_num in transitions:
+                    new_sl_ref, new_tp_ref = transitions[level_num]
+                    if new_sl_ref == "entry":
+                        cur_sl = entry_price
+                    elif new_sl_ref is not None:
+                        cur_sl = tp_levels[new_sl_ref]
+                    if new_tp_ref is not None:
+                        cur_tp = tp_levels[new_tp_ref]
+
+    return None, max_checkpoint
+
+
 def evaluate_pending_signals():
     """Hali yopilmagan signallarni, ularning o'z intervalidagi svechalar bo'yicha
     (signal chiqqandan keyingi barcha svechalarni ketma-ket ko'rib) tekshiradi:
     SL yoki TP2x/3x/5x qaysi biri birinchi urilgan bo'lsa, shuni natija qiladi.
     Bir necha bor chaqirilsa ham xavfsiz — allaqachon tekshirilgan svechalar
-    qayta hisoblanadi, lekin natija o'zgarmaydi (idempotent)."""
+    qayta hisoblanadi, lekin natija o'zgarmaydi (idempotent).
+
+    MUHIM (2026-09-15): endi HAQIQIY trailing SL/TP mexanizmini simulyatsiya
+    qiladi (signal turiga qarab - SMC 7-bosqichli, OB/FVG yangi sodda profil),
+    shunchaki "eng uzoq qayerga borgani" emas - shuning uchun natija endi
+    JONLI savdoning haqiqiy natijasiga mos keladi."""
     if not tracking_enabled():
         return None
 
@@ -1092,43 +1206,22 @@ def evaluate_pending_signals():
         tp_levels = {2: entry.get("tp2_level"), 3: entry.get("tp3_level"), 5: entry.get("tp5_level"),
                      8: entry.get("tp8_level"), 10: entry.get("tp10_level"), 12: entry.get("tp12_level"),
                      15: entry.get("tp15_level")}
+        profile = _profile_for_type(entry.get("type", ""))
+        outcome, max_checkpoint = _simulate_real_trailing(
+            direction, entry["entry_price"], sl, tp_levels, sub, profile,
+        )
         best_tp_before = entry.get("best_tp", 0)
-        best_tp = best_tp_before
-        hit_sl = False
+        entry["best_tp"] = max(max_checkpoint, best_tp_before)
 
-        for _, candle in sub.iterrows():
-            lo, hi = candle["low"], candle["high"]
-
-            sl_touched = (lo <= sl) if direction == "bullish" else (hi >= sl)
-            if sl_touched:
-                hit_sl = True
-                break
-
-            for level_num in (2, 3, 5, 8, 10, 12, 15):
-                if best_tp >= level_num or tp_levels[level_num] is None:
-                    continue
-                level_price = tp_levels[level_num]
-                tp_touched = (hi >= level_price) if direction == "bullish" else (lo <= level_price)
-                if tp_touched:
-                    best_tp = level_num
-
-            if best_tp == 15:
-                break
-
-        entry["best_tp"] = best_tp
-        if hit_sl:
+        if outcome is not None:
             entry["checked"] = True
-            entry["outcome"] = f"tp{best_tp}" if best_tp else "loss"
-            changed = True
-        elif best_tp == 15:
-            entry["checked"] = True
-            entry["outcome"] = "tp15"
+            entry["outcome"] = outcome
             changed = True
         elif (now - signal_time).total_seconds() > timeout_sec:
             entry["checked"] = True
-            entry["outcome"] = f"tp{best_tp}" if best_tp else "timeout"
+            entry["outcome"] = f"tp{max_checkpoint}" if max_checkpoint else "timeout"
             changed = True
-        elif best_tp != best_tp_before:
+        elif max_checkpoint != best_tp_before:
             changed = True  # progress o'zgardi, saqlaymiz
 
     if changed:
@@ -1138,13 +1231,14 @@ def evaluate_pending_signals():
     return _build_stats(log, checked)
 
 
-R_MAP = {"loss": -1, "timeout": 0, "tp2": 2, "tp3": 3, "tp5": 5, "tp8": 8, "tp10": 10, "tp12": 12, "tp15": 15}
+R_MAP = {"loss": -1, "timeout": 0, "breakeven": 0, "tp2": 2, "tp3": 3, "tp5": 5, "tp8": 8, "tp10": 10, "tp12": 12, "tp15": 15}
 
 
 def _stats_for_subset(checked):
     total = len(checked)
     losses = sum(1 for e in checked if e["outcome"] == "loss")
     timeouts = sum(1 for e in checked if e["outcome"] == "timeout")
+    breakevens = sum(1 for e in checked if e["outcome"] == "breakeven")
     tp2 = sum(1 for e in checked if e["outcome"] == "tp2")
     tp3 = sum(1 for e in checked if e["outcome"] == "tp3")
     tp5 = sum(1 for e in checked if e["outcome"] == "tp5")
@@ -1158,6 +1252,7 @@ def _stats_for_subset(checked):
     avg_r = round(total_r / total, 2) if total else None
     return {
         "total_checked": total, "wins": wins, "losses": losses, "timeouts": timeouts,
+        "breakevens": breakevens,
         "tp2": tp2, "tp3": tp3, "tp5": tp5, "tp8": tp8, "tp10": tp10, "tp12": tp12,
         "tp15": tp15, "win_rate": win_rate,
         "total_r": total_r, "avg_r": avg_r,
