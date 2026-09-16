@@ -95,6 +95,26 @@ def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=5
         fvg = max(matching_fvgs, key=lambda f: f["confirm_idx"])
         fvg_idx = fvg["confirm_idx"]
 
+        # KRITIK TUZATISH (2026-09-15, Jamshid grafik orqali topdi - bugun
+        # jackpot'da topib tuzatgan XUDDI SHU xato, bu yerda SMC'da ham bor
+        # ekan): sweep bilan FVG orasida narx sweep zonasining QARAMA-QARSHI
+        # tomonidan (bearish uchun sweep_area_top'dan YUQORIGA, bullish
+        # uchun sweep_area_bottom'dan PASTGA) chiqib ketgan bo'lsa - bu,
+        # sweep'ning "soxta sinish, rad etish" hikoyasi BEKOR bo'lganini
+        # bildiradi (narx aslida teskari yo'nalishda davom etgan/kuchli
+        # bo'lgan), FVG esa sweep bilan HECH QANDAY aloqasi yo'q, boshqa,
+        # aloqasiz harakatning qismi bo'lishi mumkin.
+        if direction == "bullish":
+            invalidated = any(sub["low"].iloc[k] < last_sweep["sweep_area_bottom"]
+                               for k in range(sweep_idx + 1, fvg_idx))
+        else:
+            invalidated = any(sub["high"].iloc[k] > last_sweep["sweep_area_top"]
+                               for k in range(sweep_idx + 1, fvg_idx))
+        if invalidated:
+            reason = (f"eng so'nggi sweep @{sweep_idx} + FVG @{fvg_idx} - orada narx "
+                      f"sweep zonasining qarama-qarshi chetidan chiqib ketgan - BEKOR")
+            return None, reason
+
         if fvg_idx < cur - fresh_break_window + 1:
             reason = (f"eng so'nggi sweep @{sweep_idx} + FVG @{fvg_idx} - ESKIRGAN "
                       f"(cur={cur}, fresh_break_window={fresh_break_window})")
