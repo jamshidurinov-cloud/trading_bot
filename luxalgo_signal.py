@@ -32,7 +32,7 @@ from luxalgo_smc import detect_fvg, detect_bos_choch
 from luxalgo_liquidity_sweeps import detect_luxalgo_liquidity_sweeps
 
 
-def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=5,
+def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=100,
                             sweep_mode="only_wicks", sl_buffer=0.20):
     """LuxAlgo Sweep+FVG signalini aniqlaydi.
 
@@ -40,6 +40,12 @@ def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=5
     (type, sweep_level, sweep_time, fvg_time, fvg_top, fvg_bottom,
     has_structure, structure_kind, current_close) - main.py'dagi mavjud
     compute_sl_level/log_new_signal kodiga mos kelishi uchun.
+
+    MUHIM (2026-09-17, Jamshid so'roviga ko'ra): fresh_break_window 5'dan
+    100'ga oshirildi. Sabab: qattiq sham-soniga asoslangan chegara, kuchli
+    uzluksiz trendlarda FVG'ni "eskirgan" deb rad etib, haqiqiy signalni
+    yo'qotib qo'yishi mumkin edi. 100 - amalda deyarli cheklovsiz (chunki
+    lookback=300 bo'lgani uchun FVG baribir shu oyna ichida bo'lishi kerak).
 
     MUHIM (144 -> 300): avval `lookback=144` edi, bu TwelveData'dan olinadigan
     ma'lumot chegarasiga moslashtirib tanlangan son edi (texnik limit, strategik
