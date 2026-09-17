@@ -8,13 +8,24 @@ smc_lib.py + sweep_lib.py o'rnini bosadi.
 Mantiq (avvalgi smc_official signalimiz bilan bir xil tuzilma, lekin
 LuxAlgo'ning aniq FVG/Sweep algoritmlari bilan):
 
-1. Sweep (wick_sweep yoki outbreak_retest, LuxAlgo Liquidity Sweeps'dan)
+1. Sweep (FAQAT wick_sweep - 2026-09-17'da outbreak_retest OLIB TASHLANDI,
+   pastdagi izohga qarang)
 2. FAQAT ENG SO'NGGI (xronologik eng yangi) sweep ko'rib chiqiladi - undan
    oldingi sweep'lar UMUMAN solishtirilmaydi (SMC nazariyasiga mos: sweep
    va undan keyingi FVG bitta uzluksiz institutsional harakatning qismi)
 3. Undan KEYIN hosil bo'lgan, mos yo'nalishdagi, hali "yangi" (fresh_break_window
    ichida) FVG (LuxAlgo SMC'dan, Auto Threshold + yopilish sharti bilan)
 4. BOS/CHoCH (LuxAlgo SMC'dan) - QO'SHIMCHA, majburiy emas
+
+MUHIM (2026-09-17, Jamshid so'roviga ko'ra): avval sweep_mode
+"wicks_and_outbreak_retest" edi - bu ikki TAMOMILA BOSHQA ma'noli hodisani
+("wick_sweep" = klassik rad etish/reversal, "outbreak_retest" = buzilib
+qayta sinalgan continuation) bitta ro'yxatda aralashtirib, faqat
+xronologik "eng so'nggisi"ni tanlardi - kind'idan qat'iy nazar. Bu, masalan,
+eski, aloqasiz bir outbreak_retest'ni ham "sweep" sifatida olib qo'yishi
+mumkin edi. Endi sweep_mode="only_wicks" - faqat klassik wick_sweep
+(SMC'dagi sof "liquidity grab" ta'rifiga mos) ishlatiladi,
+outbreak_retest butunlay chiqarib tashlandi.
 """
 
 from luxalgo_smc import detect_fvg, detect_bos_choch
@@ -22,7 +33,7 @@ from luxalgo_liquidity_sweeps import detect_luxalgo_liquidity_sweeps
 
 
 def detect_luxalgo_signal(df, lookback=300, swing_length=6, fresh_break_window=5,
-                            sweep_mode="wicks_and_outbreak_retest", sl_buffer=0.20):
+                            sweep_mode="only_wicks", sl_buffer=0.20):
     """LuxAlgo Sweep+FVG signalini aniqlaydi.
 
     Qaytaradi: eski smc_official signal bilan bir xil tuzilmadagi lug'at
