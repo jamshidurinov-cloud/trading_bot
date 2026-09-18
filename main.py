@@ -1031,6 +1031,8 @@ def log_new_signal(signal, price_data, interval):
         "best_tp": 0,
         "checked": False,
         "outcome": None,
+        "max_favorable_r": 0.0,
+        "max_adverse_r": 0.0,
     })
     save_signal_log(log)
     print(f"[TRACKING] Signal muvaffaqiyatli saqlandi. Jami yozuvlar soni: {len(log)}")
@@ -1086,8 +1088,24 @@ def _simulate_real_trailing(direction, entry_price, initial_sl, tp_levels, candl
     qiladi - trade_manager.py'dagi jonli mexanizmga imkon qadar mos.
 
     Qaytaradi: (outcome_str yoki None agar hali yopilmagan bo'lsa,
-                max_checkpoint - eng uzoq erishilgan checkpoint, mustaqil kuzatuv)
+                max_checkpoint - eng uzoq erishilgan checkpoint, mustaqil kuzatuv,
+                max_favorable_r - narx yopilguncha ENG UZOQ foyda tomonga borgan R
+                    (aniq, uzluksiz qiymat - faqat nomlangan checkpoint'lar emas),
+                max_adverse_r - narx yopilguncha ENG UZOQ zarar tomonga borgan R)
+
+    MUHIM (2026-09-18, Jamshid so'radi): max_favorable_r/max_adverse_r -
+    QUYIDAGI checkpoint/transitions mexanizmidan BUTUNLAY MUSTAQIL,
+    faqat xom high/low va entry_price/R asosida hisoblanadi. Bu ataylab
+    shunday qilindi - trade_manager.py'ning haqiqiy trailing sxemasi
+    2026-09-18'da o'zgargan (endi zich, har-1R, profilsiz), lekin bu yerdagi
+    SMC_TRANSITIONS/OB_FVG_TRANSITIONS jadvali hali ESKI sxemaga mos - buni
+    to'liq sinxronlash alohida, ehtiyotkorlik bilan qilinadigan vazifa
+    (statistika hisoblovchi va Telegram hisobot formatlashga ham ta'sir
+    qiladi). MFE/MAE esa bu muammoga BOG'LIQ EMAS - shuning uchun xavfsiz,
+    darhol qo'shiladi.
     """
+    r_distance = abs(entry_price - initial_sl)
+
     transitions = SMC_TRANSITIONS if profile == "smc" else OB_FVG_TRANSITIONS
     initial_tp_checkpoint = SMC_INITIAL_TP_CHECKPOINT if profile == "smc" else OB_FVG_INITIAL_TP_CHECKPOINT
 
@@ -1095,6 +1113,8 @@ def _simulate_real_trailing(direction, entry_price, initial_sl, tp_levels, candl
     cur_tp = tp_levels.get(initial_tp_checkpoint)
     triggered = set()
     max_checkpoint = 0
+    max_favorable_r = 0.0
+    max_adverse_r = 0.0
 
     def level_num_for_price(price):
         for num, p in tp_levels.items():
@@ -1105,17 +1125,32 @@ def _simulate_real_trailing(direction, entry_price, initial_sl, tp_levels, candl
     for _, candle in candles.iterrows():
         lo, hi = candle["low"], candle["high"]
 
+        # MFE/MAE - pastdagi SL/TP/checkpoint holatidan MUSTAQIL, har bir
+        # sham uchun HAR DOIM yangilanadi (r_distance=0 bo'lsa xavfsizlik
+        # uchun o'tkazib yuboriladi - nazariy jihatdan bo'lmasligi kerak).
+        if r_distance > 0:
+            if direction == "bullish":
+                favorable_r = (hi - entry_price) / r_distance
+                adverse_r = (entry_price - lo) / r_distance
+            else:
+                favorable_r = (entry_price - lo) / r_distance
+                adverse_r = (hi - entry_price) / r_distance
+            if favorable_r > max_favorable_r:
+                max_favorable_r = favorable_r
+            if adverse_r > max_adverse_r:
+                max_adverse_r = adverse_r
+
         sl_hit = (lo <= cur_sl) if direction == "bullish" else (hi >= cur_sl)
         tp_hit = (cur_tp is not None) and ((hi >= cur_tp) if direction == "bullish" else (lo <= cur_tp))
 
         if sl_hit:
             if abs(cur_sl - entry_price) < 1e-9:
-                return "breakeven", max_checkpoint
+                return "breakeven", max_checkpoint, max_favorable_r, max_adverse_r
             num = level_num_for_price(cur_sl)
-            return (f"tp{num}" if num else "loss"), max_checkpoint
+            return (f"tp{num}" if num else "loss"), max_checkpoint, max_favorable_r, max_adverse_r
         if tp_hit:
             num = level_num_for_price(cur_tp) or initial_tp_checkpoint
-            return f"tp{num}", max_checkpoint
+            return f"tp{num}", max_checkpoint, max_favorable_r, max_adverse_r
 
         for level_num in (2, 3, 5, 8, 10, 12, 15):
             if level_num in triggered or tp_levels.get(level_num) is None:
@@ -1134,7 +1169,7 @@ def _simulate_real_trailing(direction, entry_price, initial_sl, tp_levels, candl
                     if new_tp_ref is not None:
                         cur_tp = tp_levels[new_tp_ref]
 
-    return None, max_checkpoint
+    return None, max_checkpoint, max_favorable_r, max_adverse_r
 
 
 def evaluate_pending_signals():
@@ -1207,11 +1242,21 @@ def evaluate_pending_signals():
                      8: entry.get("tp8_level"), 10: entry.get("tp10_level"), 12: entry.get("tp12_level"),
                      15: entry.get("tp15_level")}
         profile = _profile_for_type(entry.get("type", ""))
-        outcome, max_checkpoint = _simulate_real_trailing(
+        outcome, max_checkpoint, max_favorable_r, max_adverse_r = _simulate_real_trailing(
             direction, entry["entry_price"], sl, tp_levels, sub, profile,
         )
         best_tp_before = entry.get("best_tp", 0)
         entry["best_tp"] = max(max_checkpoint, best_tp_before)
+
+        # 2026-09-18 QO'SHILDI: MFE/MAE - progressiv (bir necha marta
+        # chaqirilishi mumkin, chunki yangi svechalar kelgani sari qayta
+        # simulyatsiya qilinadi) - shuning uchun HAR DOIM oldingi eng
+        # yaxshi/yomon qiymat bilan solishtirib, faqat KATTAROG'INI saqlaymiz
+        # (best_tp bilan bir xil naqsh).
+        prev_favorable = entry.get("max_favorable_r", 0.0)
+        prev_adverse = entry.get("max_adverse_r", 0.0)
+        entry["max_favorable_r"] = round(max(max_favorable_r, prev_favorable), 3)
+        entry["max_adverse_r"] = round(max(max_adverse_r, prev_adverse), 3)
 
         if outcome is not None:
             entry["checked"] = True
