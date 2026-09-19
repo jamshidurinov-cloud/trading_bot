@@ -1033,6 +1033,11 @@ def log_new_signal(signal, price_data, interval):
         "outcome": None,
         "max_favorable_r": 0.0,
         "max_adverse_r": 0.0,
+        # 2026-09-18 QO'SHILDI (Jamshid so'radi): OB/FVG uchun retest'dan
+        # keyin yangi FVG bilan "kuchli" tasdiqlanganmi (True) yoki oddiy
+        # yopilish-asosli (False/yo'q, boshqa turlar uchun) - kelajakda
+        # ikkalasining natijasini solishtirish uchun.
+        "strong": signal.get("strong"),
     })
     save_signal_log(log)
     print(f"[TRACKING] Signal muvaffaqiyatli saqlandi. Jami yozuvlar soni: {len(log)}")
