@@ -47,9 +47,17 @@ from luxalgo_smc import detect_bos_choch, detect_order_blocks, detect_fvg
 
 BOS_SIZE = 6                # BOS/CHoCH uchun pivot aniqlash oynasi
 FVG_SEARCH_BACK = 10        # Order Block manbaidan necha bar orqaga qarab FVG qidirish
-EVENT_SEARCH_WINDOW = 3     # Retest "yangi" hisoblanishi uchun oxirgi nechta bar
-                            # (bitta o'tkazib yuborilgan Cron ishga tushishiga chidamli
-                            # bo'lish uchun)
+
+# MUHIM (2026-09-18, Jamshid so'radi): 3'dan 15'ga oshirildi. Bu parametr
+# ENDI ikkita vazifani bajaradi: (1) asl - cron oralig'ida bitta ishga
+# tushishni o'tkazib yuborishga chidamlilik, (2) YANGI - "signal qidirish
+# maksimal chegarasi": retest zonasiga tegilgan shamdan boshlab (shu
+# shamning o'zi ham hisobga olinib), 15 tagacha shamning ISTALGAN BIRIDA
+# yopilish zonaning FOYDALI chetidan chiqsa - tasdiqlangan (mexanizmning
+# o'zi - _check_retest - o'zgarmadi, faqat bu son kattalashtirildi).
+# Zararli tarafga yopilish esa (INVALIDATSIYA) - HAR DOIM, darhol va
+# butunlay bekor qiladi, bu songa bog'liq emas.
+EVENT_SEARCH_WINDOW = 15
 
 
 # ============================================================================
@@ -76,6 +84,38 @@ def find_swing_points(highs, lows, window=3, exclude_last=True):
 # ============================================================================
 # OB/FVG RETRACEMENT ENTRY — BOS'dan keyin, zonaga qaytishni kutadi
 # ============================================================================
+
+def _find_confirming_new_fvg(direction, fvgs, exclude_confirm_idx, after_idx, cur, window):
+    """
+    2026-09-18 QO'SHILDI (Jamshid so'roviga ko'ra, "kuchli tasdiqlash"):
+    Retest zonasi (OB yoki FVG - farqi yo'q) sodir bo'lgandan keyin, agar
+    narx SHU YO'NALISH bo'yicha YANGI, mustaqil FVG hosil qilsa - bu oddiy
+    "yopilish zonadan chiqdi" tekshiruvidan ANCHA kuchliroq tasdiq (chunki
+    FVG hosil bo'lishi o'zi allaqachon keskin, institutsional xarakterdagi
+    harakatni talab qiladi - detect_fvg'dagi delta>threshold sharti).
+
+    `exclude_confirm_idx` - agar retest zonasining o'zi allaqachon bitta FVG
+    bo'lsa (FVG-ustuvorlik tarmog'ida), o'sha FVG'ning o'zi "yangi" deb
+    hisoblanmasligi uchun (haqiqatan IKKINCHI, mustaqil FVG talab qilinadi).
+
+    Bir xil `event_search_window` (15) ishlatiladi - Jamshid bilan
+    kelishilganidek, hozircha alohida, qisqaroq oyna KIRITILMAYDI
+    ("Gis'dan keyin tekshiramiz").
+    """
+    for f in sorted(fvgs, key=lambda x: x["confirm_idx"]):
+        if f["direction"] != direction:
+            continue
+        if exclude_confirm_idx is not None and f["confirm_idx"] == exclude_confirm_idx:
+            continue
+        if f["confirm_idx"] <= after_idx:
+            continue
+        if (cur - f["confirm_idx"]) > window:
+            continue
+        if not (f["mitigated_idx"] is None or f["mitigated_idx"] > cur):
+            continue
+        return f
+    return None
+
 
 def _check_retest(direction, zone_top, zone_bottom, pattern_end_idx, closes, highs, lows,
                    cur, event_search_window):
@@ -158,14 +198,25 @@ def _try_direction(direction, bos_events, order_blocks, fvgs, sub, cur,
             ok, fail_reason = _check_retest(direction, zone_top, zone_bottom, pattern_end_idx,
                                               closes, highs, lows, cur, event_search_window)
             if ok:
+                new_fvg = _find_confirming_new_fvg(
+                    direction, fvgs, exclude_confirm_idx=fvg["confirm_idx"],
+                    after_idx=pattern_end_idx, cur=cur, window=event_search_window,
+                )
+                is_strong = new_fvg is not None
+                out_zone_top = new_fvg["top"] if is_strong else zone_top
+                out_zone_bottom = new_fvg["bottom"] if is_strong else zone_bottom
+                if is_strong:
+                    print(f"[OB_FVG KUCHLI] {direction}: retest'dan keyin YANGI FVG "
+                          f"@{new_fvg['confirm_idx']} bilan tasdiqlandi - zona yangilandi.")
                 return {
                     "type": f"ob_fvg_{direction}",
+                    "strong": is_strong,
                     "bos_time": str(times[event["break_idx"]]),
                     "bos_level": event["level"],
                     "fvg_time": str(times[fvg["confirm_idx"]]),
                     "ob_time": str(times[ob["source_idx"]]),
-                    "zone_top": zone_top,
-                    "zone_bottom": zone_bottom,
+                    "zone_top": out_zone_top,
+                    "zone_bottom": out_zone_bottom,
                     "fvg_top": fvg["top"],
                     "fvg_bottom": fvg["bottom"],
                     "ob_top": ob["bar_high"],
@@ -189,14 +240,25 @@ def _try_direction(direction, bos_events, order_blocks, fvgs, sub, cur,
         ok, fail_reason = _check_retest(direction, zone_top, zone_bottom, event["break_idx"],
                                           closes, highs, lows, cur, event_search_window)
         if ok:
+            new_fvg = _find_confirming_new_fvg(
+                direction, fvgs, exclude_confirm_idx=None,
+                after_idx=event["break_idx"], cur=cur, window=event_search_window,
+            )
+            is_strong = new_fvg is not None
+            out_zone_top = new_fvg["top"] if is_strong else zone_top
+            out_zone_bottom = new_fvg["bottom"] if is_strong else zone_bottom
+            if is_strong:
+                print(f"[OB_FVG KUCHLI] {direction}: retest'dan keyin YANGI FVG "
+                      f"@{new_fvg['confirm_idx']} bilan tasdiqlandi - zona yangilandi.")
             return {
                 "type": f"ob_fvg_{direction}",
+                "strong": is_strong,
                 "bos_time": str(times[event["break_idx"]]),
                 "bos_level": event["level"],
                 "fvg_time": None,
                 "ob_time": str(times[ob["source_idx"]]),
-                "zone_top": zone_top,
-                "zone_bottom": zone_bottom,
+                "zone_top": out_zone_top,
+                "zone_bottom": out_zone_bottom,
                 "ob_top": ob["bar_high"],
                 "ob_bottom": ob["bar_low"],
                 "entry_close": closes[cur],
